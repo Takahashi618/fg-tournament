@@ -1,0 +1,4 @@
+wxPython==4.2.5
+accessible_output2==0.17
+keyring==25.7.0
+pyinstaller==6.20.0

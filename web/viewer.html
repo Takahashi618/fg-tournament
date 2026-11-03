@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>大会ビューアー</title>
+<style>
+:root {
+  --fg: #1a1a1a; --bg: #ffffff; --line: #999;
+  --card: #f5f5f5; --accent: #0a5cc2; --done: #666;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #eeeeee; --bg: #151515; --line: #777;
+    --card: #242424; --accent: #6db2ff; --done: #aaaaaa;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 12px;
+  font-family: "Hiragino Sans", "Yu Gothic UI", Meiryo, sans-serif;
+  color: var(--fg); background: var(--bg); line-height: 1.6;
+}
+h1 { font-size: 1.3rem; margin: 0 0 4px; }
+h2 { font-size: 1.05rem; border-bottom: 1px solid var(--line);
+     padding-bottom: 2px; margin: 18px 0 6px; }
+h3 { font-size: 0.95rem; margin: 0 0 6px; }
+button {
+  font-size: 1rem; padding: 8px 14px; margin-right: 8px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--card); color: var(--fg); cursor: pointer;
+}
+button[aria-pressed="true"] { border: 2px solid var(--accent); font-weight: 700; }
+button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+#summary { margin: 4px 0; }
+#updated { margin-left: 8px; color: var(--done); }
+#live { min-height: 1.4em; margin: 6px 0; font-weight: 700; }
+#error { color: #c2331a; min-height: 1.4em; margin: 2px 0; }
+ul.matches { list-style: none; padding-left: 0; margin: 4px 0 12px; }
+ul.matches li {
+  padding: 6px 8px; margin: 4px 0; border-radius: 6px;
+  background: var(--card); border-left: 5px solid transparent;
+}
+ul.matches li.st-ready { border-left-color: var(--accent); }
+ul.matches li.st-done { color: var(--done); }
+table { border-collapse: collapse; margin: 6px 0 12px; }
+caption { text-align: left; font-weight: 700; margin-bottom: 4px; }
+th, td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; }
+th { background: var(--card); }
+.bracket-wrap { overflow-x: auto; }
+.bracket { display: flex; gap: 16px; align-items: stretch; padding: 6px 0; }
+.round-col {
+  display: flex; flex-direction: column; justify-content: space-around;
+  gap: 10px; min-width: 190px;
+}
+.card {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 8px;
+}
+.card.st-ready { border: 2px solid var(--accent); }
+.mrow { display: flex; gap: 6px; align-items: baseline; }
+.mrow .pname { flex: 1; }
+.mrow.win { font-weight: 700; }
+.mark {
+  font-size: 0.8rem; border: 1px solid currentColor;
+  border-radius: 4px; padding: 0 4px;
+}
+.score { min-width: 1.2em; text-align: right; }
+footer { margin-top: 24px; color: var(--done); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">読み込み中…</h1>
+  <p id="summary"></p>
+  <div class="controls" role="group" aria-label="表示切替">
+    <button id="mode-list" aria-pressed="true">リスト表示</button>
+    <button id="mode-bracket" aria-pressed="false">ブラケット表示</button>
+    <button id="reload">今すぐ更新</button>
+    <span id="updated"></span>
+  </div>
+  <p id="live" aria-live="polite"></p>
+  <p id="error" role="status"></p>
+</header>
+<main>
+  <section aria-labelledby="standings-h">
+    <h2 id="standings-h">順位・状況</h2>
+    <div id="standings"></div>
+  </section>
+  <section id="list-view" aria-label="試合一覧(リスト)"></section>
+  <section id="bracket-view" aria-label="試合一覧(ブラケット)" hidden>
+    <div class="bracket-wrap" id="bracket-root"></div>
+  </section>
+</main>
+<footer>15秒ごとに自動更新します。</footer>
+<script>
+"use strict";
+const params = new URLSearchParams(location.search);
+const TOKEN = params.get("t") || "";
+const RELAY = "tournament_relay.php";
+let firstLoad = true;
+let prevEvent = null;
+
+const $ = (id) => document.getElementById(id);
+function el(tag, cls) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  return e;
+}
+function showError(msg) { $("error").textContent = msg; }
+
+async function load() {
+  if (!TOKEN) {
+    showError("URLにトークンがありません。主催者から届いたURLをそのまま開いてください。");
+    return;
+  }
+  try {
+    const res = await fetch(
+      RELAY + "?action=get&token=" + encodeURIComponent(TOKEN),
+      { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    render(data);
+    showError("");
+  } catch (e) {
+    showError("取得に失敗しました(" + e.message + ")。前回の内容を表示しています。");
+  }
+}
+
+function render(data) {
+  document.title = data.title + " - 大会ビューアー";
+  $("title").textContent = data.title + "(" + data.format_name + ")";
+  $("summary").textContent = data.summary || "";
+  try {
+    const d = new Date(data.updated_at);
+    $("updated").textContent = "最終更新 " + d.toLocaleTimeString("ja-JP");
+  } catch (e) { $("updated").textContent = ""; }
+
+  if (!firstLoad && data.last_event && data.last_event !== prevEvent) {
+    $("live").textContent = "更新: " + data.last_event;
+  }
+  prevEvent = data.last_event;
+
+  renderStandings(data);
+  renderList(data);
+  renderBracket(data);
+
+  if (data.format === "round_robin") {
+    $("mode-bracket").hidden = true;
+    setMode("list");
+  } else {
+    $("mode-bracket").hidden = false;
+  }
+  firstLoad = false;
+}
+
+function renderStandings(data) {
+  const root = $("standings");
+  root.replaceChildren();
+  if (data.league_table && data.league_table.length) {
+    root.appendChild(buildTable(
+      ["順位", "選手", "勝", "敗", "得失差"],
+      data.league_table.map(r =>
+        [r.rank + "位", r.name, r.wins, r.losses,
+         (r.diff > 0 ? "+" : "") + r.diff])));
+    return;
+  }
+  if (data.placements && data.placements.length) {
+    root.appendChild(buildTable(
+      ["順位", "選手"],
+      data.placements.map(r => [r.place + "位", r.name])));
+    return;
+  }
+  const ul = el("ul", "matches");
+  (data.standings_lines || []).forEach(line => {
+    const li = el("li");
+    li.textContent = line;
+    ul.appendChild(li);
+  });
+  root.appendChild(ul);
+}
+
+function buildTable(headers, rows) {
+  const t = el("table");
+  const thead = el("thead");
+  const trh = el("tr");
+  headers.forEach(h => {
+    const th = el("th");
+    th.setAttribute("scope", "col");
+    th.textContent = h;
+    trh.appendChild(th);
+  });
+  thead.appendChild(trh);
+  t.appendChild(thead);
+  const tbody = el("tbody");
+  rows.forEach(cells => {
+    const tr = el("tr");
+    cells.forEach(c => {
+      const td = el("td");
+      td.textContent = String(c);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  t.appendChild(tbody);
+  return t;
+}
+
+function renderList(data) {
+  const root = $("list-view");
+  root.replaceChildren();
+  let curGroup = null;
+  let ul = null;
+  data.matches.forEach(m => {
+    if (m.group !== curGroup) {
+      curGroup = m.group;
+      const h2 = el("h2");
+      h2.textContent = m.group;
+      root.appendChild(h2);
+      ul = el("ul", "matches");
+      root.appendChild(ul);
+    }
+    const li = el("li", "st-" + m.state);
+    li.textContent = m.line;
+    ul.appendChild(li);
+  });
+}
+
+function renderBracket(data) {
+  const root = $("bracket-root");
+  root.replaceChildren();
+  const sections = [
+    ["ウィナーズ側", ["winners", "league"]],
+    ["ルーザーズ側", ["losers"]],
+    ["決勝", ["third_place", "grand_final", "grand_final_reset"]],
+  ];
+  sections.forEach(([name, phases]) => {
+    const ms = data.matches.filter(m => phases.includes(m.phase));
+    if (!ms.length) return;
+    const sec = el("section");
+    sec.setAttribute("aria-label", name);
+    const wrap = el("div", "bracket");
+    const rounds = new Map();
+    ms.forEach(m => {
+      const key = m.phase + ":" + m.round;
+      if (!rounds.has(key)) rounds.set(key, []);
+      rounds.get(key).push(m);
+    });
+    rounds.forEach(list => {
+      const col = el("div", "round-col");
+      const h3 = el("h3");
+      h3.textContent = list[0].group;
+      col.appendChild(h3);
+      list.forEach(m => col.appendChild(card(m)));
+      wrap.appendChild(col);
+    });
+    sec.appendChild(wrap);
+    root.appendChild(sec);
+  });
+}
+
+function card(m) {
+  const d = el("div", "card st-" + m.state);
+  d.setAttribute("role", "group");
+  d.setAttribute("aria-label", m.line);
+  d.appendChild(row(m, m.p1, m.s1, m.winner_slot === 1));
+  d.appendChild(row(m, m.p2, m.s2, m.winner_slot === 2));
+  return d;
+}
+
+function row(m, name, score, isWinner) {
+  const r = el("div", "mrow" + (isWinner ? " win" : ""));
+  const n = el("span", "pname");
+  n.textContent = name;
+  r.appendChild(n);
+  if (isWinner) {
+    const w = el("span", "mark");
+    w.textContent = m.forfeit ? "不戦勝" : (m.auto ? "不戦" : "勝");
+    r.appendChild(w);
+  }
+  if (score !== null && score !== undefined) {
+    const s = el("span", "score");
+    s.textContent = String(score);
+    r.appendChild(s);
+  }
+  return r;
+}
+
+function setMode(mode) {
+  const isList = mode === "list";
+  $("list-view").hidden = !isList;
+  $("bracket-view").hidden = isList;
+  $("mode-list").setAttribute("aria-pressed", String(isList));
+  $("mode-bracket").setAttribute("aria-pressed", String(!isList));
+}
+
+$("mode-list").addEventListener("click", () => setMode("list"));
+$("mode-bracket").addEventListener("click", () => setMode("bracket"));
+$("reload").addEventListener("click", load);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) load();
+});
+setInterval(() => { if (!document.hidden) load(); }, 15000);
+load();
+</script>
+</body>
+</html>
