@@ -119,12 +119,27 @@ async function load() {
     const res = await fetch(
       RELAY + "?action=get&token=" + encodeURIComponent(TOKEN),
       { cache: "no-store" });
+    if (res.status === 404) {
+      // まだ公開されていないか、主催者が閲覧URLを作り直した
+      if (firstLoad) {
+        $("title").textContent = "大会ビューアー";
+        showError("このURLの大会はまだ公開されていないか、URLが変わりました。主催者に確認してください。");
+      } else {
+        showError("このURLでの公開は終わりました。表示は最後に届いた内容です。主催者に新しいURLを確認してください。");
+      }
+      return;
+    }
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
     render(data);
     showError("");
   } catch (e) {
-    showError("取得に失敗しました(" + e.message + ")。前回の内容を表示しています。");
+    if (firstLoad) {
+      $("title").textContent = "大会ビューアー";
+      showError("取得に失敗しました(" + e.message + ")。しばらくすると自動でもう一度試します。");
+    } else {
+      showError("取得に失敗しました(" + e.message + ")。前回の内容を表示しています。");
+    }
   }
 }
 

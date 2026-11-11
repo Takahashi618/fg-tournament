@@ -19,13 +19,13 @@ from app.dialogs import (HelpDialog, ImpactConfirmDialog, OrderDialog,
                          PlayersDialog, PublishDialog, ResultDialog,
                          SetupDialog)
 from app.speech import Speaker
-from domain import EngineError, MatchState, TournamentEngine
+from domain import EngineError, Format, MatchState, TournamentEngine
 from domain import textgen
 from publish import exporter
 from publish.uploader import Publisher
 
 APP_NAME = "格ゲー大会マネージャー"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 APP_TITLE = f"{APP_NAME} v{APP_VERSION}"
 
 
@@ -80,7 +80,7 @@ class MainFrame(wx.Frame):
 
         m_game = wx.Menu()
         m_game.Append(ID_INPUT, "選択中の試合の結果入力・修正(&E)")
-        m_game.Append(ID_UNDO, "直前の結果入力を取り消し(&U)\tCtrl+Z")
+        m_game.Append(ID_UNDO, "直前の結果入力・修正を取り消し(&U)\tCtrl+Z")
         m_game.AppendSeparator()
         m_game.Append(ID_SUMMARY, "全体状況を読み上げ(&R)\tF5")
         m_game.Append(ID_VIEW, "ビュー切替(&V)\tF6")
@@ -259,6 +259,7 @@ class MainFrame(wx.Frame):
     # ---------- 大会操作 ----------
 
     def _on_undo(self):
+        was_edit = self.engine.last_undo_kind() == "edit"
         try:
             mid = self.engine.undo_last()
         except EngineError as exc:
@@ -266,10 +267,16 @@ class MainFrame(wx.Frame):
             return
         line = textgen.match_line(self.engine.state,
                                   self.engine.state.matches[mid])
-        self._last_event = f"結果の取り消し: {line}"
+        if was_edit:
+            # 修正の取り消しは、修正する前の結果(消えた下流の結果も)へ戻す
+            self._last_event = f"修正の取り消し: {line}"
+            spoken = f"修正を取り消しました。{line}"
+        else:
+            self._last_event = f"結果の取り消し: {line}"
+            spoken = f"取り消しました。{line}"
         self._autosave()
         self._refresh()
-        self._announce(f"取り消しました。{line}")
+        self._announce(spoken)
         self._maybe_auto_upload()
 
     def _on_summary(self):
@@ -288,7 +295,9 @@ class MainFrame(wx.Frame):
         config = sdlg.get_config()
         sdlg.Destroy()
 
-        pdlg = PlayersDialog(self, self.speaker)
+        # ダブルエリミネーションは3人から。人数の不足は選手登録の画面で知らせる
+        min_players = 3 if config.format == Format.DOUBLE_ELIM else 2
+        pdlg = PlayersDialog(self, self.speaker, min_players=min_players)
         if pdlg.ShowModal() != wx.ID_OK:
             pdlg.Destroy()
             return
@@ -318,13 +327,17 @@ class MainFrame(wx.Frame):
             self.speaker.error(str(exc))
             return
 
+        kept = self._keep_previous_autosave()
         self.engine = eng
         self.file_path = None
+        self._last_event = None
         self.view_index = 0
         self._refresh(keep_selection=False)
         self._autosave()
-        self._announce("ブラケットを生成しました。"
-                       + textgen.overall_summary(eng.state), delay_ms=300)
+        msg = "ブラケットを生成しました。" + textgen.overall_summary(eng.state)
+        if kept:
+            msg += "前の大会の自動保存は、別の名前で data フォルダに残しました。"
+        self._announce(msg, delay_ms=300)
 
     # ---------- 保存・読み込み ----------
 
@@ -341,10 +354,18 @@ class MainFrame(wx.Frame):
         dlg.Destroy()
         try:
             self.engine = TournamentEngine.load(path)
-        except Exception as exc:
+        except EngineError as exc:
             self.speaker.error(f"読み込みに失敗しました。{exc}")
             return
+        except OSError:
+            self.speaker.error("読み込みに失敗しました。ファイルを開けません。")
+            return
+        except Exception:
+            self.speaker.error("読み込みに失敗しました。"
+                               "大会ファイルの内容が壊れています。")
+            return
         self.file_path = path
+        self._last_event = None
         self.view_index = 0
         self._refresh(keep_selection=False)
         self._announce("読み込みました。"
@@ -367,20 +388,39 @@ class MainFrame(wx.Frame):
             if dlg.ShowModal() != wx.ID_OK:
                 dlg.Destroy()
                 return
-            self.file_path = Path(dlg.GetPath())
+            target = Path(dlg.GetPath())
             dlg.Destroy()
+        else:
+            target = self.file_path
         try:
-            self.engine.save(self.file_path)
-        except Exception as exc:
-            self.speaker.error(f"保存に失敗しました。{exc}")
+            self.engine.save(target)
+        except Exception:
+            self.speaker.error("保存に失敗しました。"
+                               "保存先に書き込めるか確認してください。")
             return
-        self.speaker.success(f"保存しました。{self.file_path.name}")
+        # 保存できてから保存先を覚える(失敗した場所へ自動保存し続けない)
+        self.file_path = target
+        self.speaker.success(f"保存しました。{target.name}")
 
     def _default_filename(self) -> str:
         title = self.engine.state.config.title
         safe = re.sub(r'[\\/:*?"<>|]', "_", title).strip() or "大会"
         stamp = datetime.date.today().strftime("%Y%m%d")
         return f"{stamp}_{safe}.json"
+
+    def _keep_previous_autosave(self) -> bool:
+        """新しい大会が autosave.json を上書きする前に、前の内容を別の名前で残す。
+        名前を付けて保存していない大会が、新規作成で消えないようにするため。"""
+        auto = DATA_DIR / "autosave.json"
+        if not auto.exists():
+            return False
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            auto.replace(DATA_DIR / f"autosave_backup_{stamp}.json")
+        except OSError:
+            self.speaker.warn("前の大会の自動保存を残せませんでした。")
+            return False
+        return True
 
     def _autosave(self):
         """結果入力のたびに自動保存する。保存先が未指定なら autosave.json。"""
@@ -401,9 +441,21 @@ class MainFrame(wx.Frame):
     def _on_publish_settings(self):
         dlg = PublishDialog(self, self.publisher)
         saved = dlg.ShowModal() == wx.ID_OK
+        retired = dlg.retired  # 作り直す前の (relay のURL, トークン)。無ければ None
         dlg.Destroy()
         if not saved:
             return
+        if retired is not None:
+            # 古い閲覧URLの内容をサーバーから消す(消せなければ知らせる)
+            def deleted(ok: bool, msg: str):
+                if not ok:
+                    wx.CallAfter(
+                        self.speaker.warn,
+                        "古い閲覧URLの内容をサーバーから消せませんでした。"
+                        "古いURLでは、最後に送った内容が見え続けます。" + msg,
+                        False)
+
+            self.publisher.delete_remote_async(retired[1], retired[0], deleted)
         if self.publisher.enabled:
             self.speaker.say("公開設定を保存しました。公開は有効です。"
                              "Ctrl+Uでいつでもアップロードできます。")

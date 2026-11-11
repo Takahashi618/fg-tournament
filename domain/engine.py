@@ -1,13 +1,15 @@
 """大会エンジン。操作ログ(actions)が唯一の真実。状態は常にログの再生で導出する。
 
-- undo = 末尾の report を取り除いて再生
-- 過去試合の修正 = 下流(winner_to / loser_to の推移閉包)の report を削除して再生
-- シャッフルは結果の並び順を set_order として記録(乱数シード非依存で完全再現)
+- undo = 末尾の report または edit を取り除いて再生
+- 過去試合の修正 = edit としてログに足す。再生のときに、勝者が同じなら元の report を
+  差し替え、勝者が変わるなら下流(winner_to / loser_to の推移閉包)の report を外して
+  新しい結果を末尾に置く。修正もログに残るので、undo で修正の前へ戻せる
+- 並び順は set_order として記録する
 """
 from __future__ import annotations
 
 import json
-import random
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -66,15 +68,6 @@ class TournamentEngine:
         self._commit(self.actions + [Action("register_players",
                                             {"names": cleaned})])
 
-    def shuffle(self, rng_seed: Optional[int] = None) -> None:
-        """並び順をシャッフルして set_order として記録する。"""
-        ids = [p.player_id for p in self.state.players]
-        if not ids:
-            raise EngineError("選手が登録されていません")
-        rng = random.Random(rng_seed)
-        rng.shuffle(ids)
-        self.set_order(ids)
-
     def set_order(self, ordered_ids: list[str]) -> None:
         current = {p.player_id for p in self.state.players}
         if len(ordered_ids) != len(current) or set(ordered_ids) != current:
@@ -93,10 +86,14 @@ class TournamentEngine:
         self._commit(self.actions + [Action("report", payload)])
 
     def can_undo(self) -> bool:
-        return bool(self.actions) and self.actions[-1].kind == "report"
+        return bool(self.actions) and self.actions[-1].kind in ("report", "edit")
+
+    def last_undo_kind(self) -> Optional[str]:
+        """次の undo が取り消す操作の種類("report" か "edit")。無ければ None。"""
+        return self.actions[-1].kind if self.can_undo() else None
 
     def undo_last(self) -> str:
-        """直近の結果入力を取り消し、対象の試合IDを返す。"""
+        """直近の結果入力または修正を取り消し、対象の試合IDを返す。"""
         if not self.can_undo():
             raise EngineError("取り消せる結果入力がありません")
         mid = self.actions[-1].payload["match_id"]
@@ -131,24 +128,10 @@ class TournamentEngine:
         new_payload = {"match_id": match_id, "winner_slot": winner_slot,
                        "score1": score1, "score2": score2, "forfeit": forfeit}
 
-        if m.result.winner_slot == int(winner_slot):
-            # 勝者が同じならその場で差し替え(下流に影響なし)
-            new_actions: list[Action] = []
-            for a in self.actions:
-                if a.kind == "report" and a.payload["match_id"] == match_id:
-                    new_actions.append(Action("report", new_payload))
-                else:
-                    new_actions.append(a)
-            self._commit(new_actions)
-            return []
-
-        cleared = self.preview_edit_impact(match_id)
-        remove = set(cleared) | {match_id}
-        new_actions = [a for a in self.actions
-                       if not (a.kind == "report"
-                               and a.payload["match_id"] in remove)]
-        new_actions.append(Action("report", new_payload))
-        self._commit(new_actions)
+        # 勝者が同じならスコアの差し替えだけで、下流には影響しない
+        cleared = ([] if m.result.winner_slot == int(winner_slot)
+                   else self.preview_edit_impact(match_id))
+        self._commit(self.actions + [Action("edit", new_payload)])
         return cleared
 
     # ---------- 参照 ----------
@@ -186,21 +169,35 @@ class TournamentEngine:
 
     @classmethod
     def from_dict(cls, data: dict) -> "TournamentEngine":
+        if not isinstance(data, dict):
+            raise EngineError("大会ファイルではありません")
         if data.get("format_version") != FORMAT_VERSION:
             raise EngineError("保存データの形式バージョンが対応外です")
         eng = cls()
-        eng._commit([Action(d["kind"], dict(d["payload"]))
-                     for d in data.get("actions", [])])
+        try:
+            eng._commit([Action(d["kind"], dict(d["payload"]))
+                         for d in data.get("actions", [])])
+        except EngineError:
+            raise
+        except (KeyError, TypeError, ValueError, AttributeError, IndexError):
+            raise EngineError("大会ファイルの内容が壊れています") from None
         return eng
 
     def save(self, path) -> None:
-        Path(path).write_text(
+        """一時ファイルに書いてから置き換える(書いている途中で落ちても元が残る)。"""
+        path = Path(path)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(
             json.dumps(self.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8")
+        os.replace(tmp, path)
 
     @classmethod
     def load(cls, path) -> "TournamentEngine":
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except ValueError:  # JSON でない、UTF-8 でない
+            raise EngineError("大会ファイルとして読めません") from None
         return cls.from_dict(data)
 
     # ---------- 内部 ----------
@@ -218,9 +215,41 @@ class TournamentEngine:
 
     def _rebuild(self) -> None:
         st = TournamentState(Config())
-        for act in self.actions:
+        for act in self._effective(self.actions):
             self._apply(st, act)
         self.state = st
+
+    def _effective(self, actions: list[Action]) -> list[Action]:
+        """edit を畳み込んだ、再生用のアクション列を返す。"""
+        if not any(a.kind == "edit" for a in actions):
+            return actions
+        # 配線(下流の判定)は結果に依らないので、結果以外の操作だけで組む
+        base = TournamentState(Config())
+        for act in actions:
+            if act.kind not in ("report", "edit"):
+                self._apply(base, act)
+        out: list[Action] = []
+        for act in actions:
+            if act.kind != "edit":
+                out.append(act)
+                continue
+            mid = act.payload["match_id"]
+            idx = next((i for i, a in enumerate(out)
+                        if a.kind == "report"
+                        and a.payload["match_id"] == mid), None)
+            if idx is None:
+                raise EngineError("この試合には修正できる結果がありません")
+            new = Action("report", dict(act.payload))
+            if (int(out[idx].payload["winner_slot"])
+                    == int(act.payload["winner_slot"])):
+                out[idx] = new
+            else:
+                remove = self._descendants(mid, base) | {mid}
+                out = [a for a in out
+                       if not (a.kind == "report"
+                               and a.payload["match_id"] in remove)]
+                out.append(new)
+        return out
 
     def _apply(self, st: TournamentState, act: Action) -> None:
         kind, p = act.kind, act.payload
@@ -228,14 +257,20 @@ class TournamentEngine:
             if st.generated:
                 raise EngineError("生成後に設定は変更できません")
 
+            def _bo(v) -> int:
+                n = int(v)
+                if n < 1 or n % 2 == 0:
+                    raise EngineError("セット数の設定が不正です")
+                return n
+
             def _opt(key: str):
                 v = p.get(key)
-                return int(v) if v is not None else None
+                return _bo(v) if v is not None else None
 
             st.config = Config(
                 title=p["title"], format=Format(p["format"]),
-                best_of_default=int(p["best_of_default"]),
-                best_of_finals=int(p["best_of_finals"]),
+                best_of_default=_bo(p["best_of_default"]),
+                best_of_finals=_bo(p["best_of_finals"]),
                 gf_reset=bool(p["gf_reset"]),
                 third_place=bool(p["third_place"]),
                 best_of_wf=_opt("best_of_wf"),
@@ -258,12 +293,18 @@ class TournamentEngine:
             if st.generated:
                 raise EngineError("ブラケットは生成済みです")
             fmt = st.config.format
-            if fmt == Format.SINGLE_ELIM:
-                ms = build_single_elim(st.players, st.config)
-            elif fmt == Format.DOUBLE_ELIM:
-                ms = build_double_elim(st.players, st.config)
-            else:
-                ms = build_round_robin(st.players, st.config)
+            if not (2 <= len(st.players) <= 16):
+                raise EngineError("選手は2人から16人までです")
+            try:
+                if fmt == Format.SINGLE_ELIM:
+                    ms = build_single_elim(st.players, st.config)
+                elif fmt == Format.DOUBLE_ELIM:
+                    ms = build_double_elim(st.players, st.config)
+                else:
+                    ms = build_round_robin(st.players, st.config)
+            except ValueError as exc:
+                # 人数が形式に足りないとき。そのまま読み上げに使える文にする
+                raise EngineError(str(exc)) from None
             st.matches = {m.match_id: m for m in ms}
             st.match_order = [m.match_id for m in ms]
             st.generated = True
@@ -336,9 +377,10 @@ class TournamentEngine:
                         gfr.skipped = True
                         changed = True
 
-    def _descendants(self, match_id: str) -> set[str]:
+    def _descendants(self, match_id: str,
+                     st: Optional[TournamentState] = None) -> set[str]:
         """winner_to / loser_to の推移閉包(自身は含まない)。GF なら GFR も含む。"""
-        st = self.state
+        st = st or self.state
         out: set[str] = set()
         stack = [match_id]
         while stack:

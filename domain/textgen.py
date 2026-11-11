@@ -140,6 +140,18 @@ def report_announcement(state: TournamentState, m: Match) -> str:
     reset_now = (m.match_id == "GF" and state.config.gf_reset
                  and r.winner_slot == 2)
 
+    if m.phase == Phase.LEAGUE:
+        # リーグ戦は最後の試合の勝者が優勝者とは限らないので、順位表から言う
+        if standings.is_finished(state):
+            if champ is not None:
+                parts.append(f"全試合終了。{state.name_of(champ)}の優勝です。")
+            else:
+                parts.append("全試合終了。同率首位のため優勝者は未確定です。")
+        return "".join(parts)
+    if m.phase == Phase.THIRD_PLACE:
+        parts.append(f"{w}は3位、{lo}は4位。")
+        return "".join(parts)
+
     if reset_now:
         parts.append(f"ブラケットリセット。{w}と{lo}でリセット戦を行います。")
     elif champ is not None and champ == m.winner_id():
@@ -150,8 +162,6 @@ def report_announcement(state: TournamentState, m: Match) -> str:
     if lid is not None and lid != BYE_ID and not reset_now:
         if m.loser_to is not None:
             parts.append(f"{lo}は{_dest_label(state, m.loser_to)}へ。")
-        elif m.phase == Phase.LEAGUE:
-            pass
         elif champ is not None and champ == m.winner_id():
             parts.append(f"{lo}は準優勝。")
         else:

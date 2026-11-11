@@ -113,12 +113,91 @@ def run() -> None:
     d.Destroy()
     check(True, "HelpDialog 構築")
 
+    # 以下は EndModal と MessageBox を差し替えて、画面を出さずに動きを確かめる
+    import shutil
+    import tempfile
+    from app import dialogs
     from app.dialogs import PublishDialog
     from publish.uploader import Publisher
-    pub = Publisher(ROOT / "tests" / "tmp_pub")
-    d = PublishDialog(frame, pub)
-    d.Destroy()
-    check(True, "PublishDialog 構築")
+
+    boxes: list[str] = []
+    real_box = dialogs.wx.MessageBox
+    dialogs.wx.MessageBox = lambda msg, *a, **k: boxes.append(msg) or wx.YES
+    try:
+        # ダブルエリミネーションは3人から(選手登録の画面で断る)
+        d = PlayersDialog(frame, frame.speaker, min_players=3)
+        ended: list[int] = []
+        d.EndModal = ended.append
+        d.text.SetValue("田中\n鈴木")
+        d._on_ok()
+        check(not ended and boxes and "3人" in boxes[-1],
+              "PlayersDialog 2人はダブルエリミで断る")
+        d.text.SetValue("田中\n鈴木\n佐藤")
+        d._on_ok()
+        check(ended == [wx.ID_OK] and d.get_names() == ["田中", "鈴木", "佐藤"],
+              "PlayersDialog 3人なら通る")
+        d.Destroy()
+
+        tmp = Path(tempfile.mkdtemp())
+        pub = Publisher(tmp)
+        pub.relay_url = "https://example.com/old/tournament_relay.php"
+        pub.token = "a" * 32
+        pub.save()
+
+        # 作り直してもキャンセルすれば何も変わらない
+        d = PublishDialog(frame, pub)
+        d.EndModal = ended.append
+        d._on_issue()
+        check(("a" * 32) not in d.viewer_ctrl.GetValue(),
+              "PublishDialog 発行で画面の閲覧URLが変わる")
+        d.Destroy()
+        check(Publisher(tmp).token == "a" * 32 and pub.token == "a" * 32,
+              "PublishDialog 発行しても保存するまで確定しない")
+
+        # http の URL は保存できない
+        d = PublishDialog(frame, pub)
+        ended.clear()
+        d.EndModal = ended.append
+        d.enable_check.SetValue(True)
+        d.url_ctrl.SetValue("http://example.com/tournament_relay.php")
+        d._on_ok()
+        check(not ended and "https" in boxes[-1]
+              and Publisher(tmp).relay_url.startswith("https://"),
+              "PublishDialog http のURLは断る")
+
+        # 作り直して保存すると、古いURLとトークンを呼び出し側へ渡す
+        d.url_ctrl.SetValue("https://example.com/new/tournament_relay.php")
+        d._on_issue()
+        d._on_ok()
+        saved = Publisher(tmp)
+        check(ended == [wx.ID_OK] and saved.token != "a" * 32
+              and len(saved.token) == 32 and saved.enabled
+              and saved.relay_url.endswith("/new/tournament_relay.php"),
+              "PublishDialog 作り直して保存")
+        check(d.retired == ("https://example.com/old/tournament_relay.php",
+                            "a" * 32),
+              "PublishDialog 消すべき古いURLとトークンを返す")
+        d.Destroy()
+        shutil.rmtree(tmp, ignore_errors=True)
+    finally:
+        dialogs.wx.MessageBox = real_box
+
+    # 新規作成の前に、前の自動保存を別の名前で残す
+    from app import main as app_main
+    tmp = Path(tempfile.mkdtemp())
+    real_dir = app_main.DATA_DIR
+    app_main.DATA_DIR = tmp
+    try:
+        check(frame._keep_previous_autosave() is False,
+              "自動保存が無ければ何もしない")
+        eng.save(tmp / "autosave.json")
+        check(frame._keep_previous_autosave() is True
+              and not (tmp / "autosave.json").exists()
+              and len(list(tmp.glob("autosave_backup_*.json"))) == 1,
+              "前の自動保存を別の名前で残す")
+    finally:
+        app_main.DATA_DIR = real_dir
+        shutil.rmtree(tmp, ignore_errors=True)
 
     frame.Destroy()
     check(True, "破棄完了")

@@ -48,7 +48,7 @@ python -X utf8 tests/smoke_app.py
 新しい仮想環境に requirements.txt だけを入れて作ってください。ほかの部品が入った環境で作ると、使っていない部品まで exe に入ります。
 
 ```
-python -m PyInstaller --noconfirm --clean FGTournament_v1.0.3.spec
+python -m PyInstaller --noconfirm --clean FGTournament_v1.0.4.spec
 ```
 
 ## オンライン公開のサーバーを用意する
@@ -56,12 +56,14 @@ python -m PyInstaller --noconfirm --clean FGTournament_v1.0.3.spec
 閲覧ページを使うには、PHP が動く自分のサーバーが必要です。このソフトには接続先のサーバーは入っていません。
 
 1. web フォルダの tournament_relay.php を開き、`__ADMIN_KEY__` の行の `__ADMIN_KEY__` を、推測されにくい長い文字列（管理キー）に置き換えます
-2. tournament_relay.php と viewer.html を、サーバーの同じフォルダに置きます。HTTPS で開ける場所にしてください
+2. tournament_relay.php と viewer.html を、サーバーの同じフォルダに置きます。HTTPS で開ける場所にしてください（アプリは `https://` で始まる URL だけを受け付けます）
 3. 同じフォルダに書き込めるようにします。大会のデータは、その中の t フォルダに保存します
 4. t フォルダの一覧が外から見えないように、サーバーのディレクトリ一覧の表示を止めます。閲覧 URL に入っている文字列は、ファイルの名前と同じです
 5. アプリの公開メニューの公開設定で、tournament_relay.php の URL と管理キーを入力します
 
 管理キーを書き込んだ tournament_relay.php は、公開の場所に載せないでください。
+
+アプリで閲覧 URL を作り直すと、古い URL の内容をサーバーから消します。1.0.3 以前の tournament_relay.php にはこの機能が無いので、アプリを更新したらサーバーのファイルも置き換えてください。
 
 ## ライセンス
 

@@ -410,6 +410,153 @@ play_all(e, chooser=lambda m: 2 if m.match_id == "GF" else 1)
 t1, d1 = standings.real_match_counts(e.state)
 check(t1 == 7 and d1 == 7, f"双4人: リセット戦発生で7対7({t1}対{d1})")
 
+# ---------- J. 修正の取り消し ----------
+note("=== J. 修正の取り消し ===")
+e = new_engine(Format.SINGLE_ELIM, names_n(8))
+e.report("W1-1", 1, 2, 0)
+e.report("W1-2", 1, 2, 0)
+before = sig(e)
+e.edit_result("W1-1", 1, 2, 1)  # スコアだけの訂正
+check(e.last_undo_kind() == "edit", "修正の後は、次の取り消しの対象が修正")
+mid = e.undo_last()
+check(mid == "W1-1", "スコア訂正の取り消し: 対象は訂正した試合")
+check(sig(e) == before, "スコア訂正の取り消し: 訂正の前に戻る")
+check(e.state.matches["W1-2"].result is not None,
+      "スコア訂正の取り消し: ほかの試合の結果は消えない")
+
+e.report("W2-1", 1, 2, 0)
+before = sig(e)
+cleared = e.edit_result("W1-1", 2, 0, 2)  # 勝者を変える
+check(cleared == ["W2-1"], "勝者を変える修正: 下流がクリアされる")
+mid = e.undo_last()
+check(mid == "W1-1", "勝者を変えた修正の取り消し: 対象は修正した試合")
+check(sig(e) == before, "勝者を変えた修正の取り消し: 下流の結果も戻る")
+check(e.last_undo_kind() == "report", "修正を取り消すと、次の対象は結果入力")
+
+# 修正を重ねても、保存と読み直しで同じ状態になる
+e.edit_result("W1-1", 2, 1, 2)
+e.report("W2-1", 2, 0, 2)
+e.edit_result("W2-1", 2, 1, 2)
+e.edit_result("W1-1", 1, 2, 0)
+e_loaded = TournamentEngine.from_dict(json.loads(json.dumps(e.to_dict())))
+check(sig(e) == sig(e_loaded), "修正を含むログ: 保存→読込で状態一致")
+check(e.state.matches["W2-1"].result is None,
+      "修正を含むログ: 最後の修正で下流がクリアされている")
+
+err = False
+try:
+    e.edit_result("W3-1", 1, 2, 0)  # まだ結果の無い試合
+except EngineError:
+    err = True
+check(err, "結果の無い試合は修正できない")
+
+# ---------- K. 人数と壊れたデータ ----------
+note("=== K. 人数と壊れたデータ ===")
+e = TournamentEngine()
+e.setup(Config(title="2人", format=Format.DOUBLE_ELIM))
+e.register_players(["A", "B"])
+msg = ""
+try:
+    e.generate()
+except EngineError as exc:
+    msg = str(exc)
+except Exception as exc:  # EngineError 以外で止まってはいけない
+    msg = "別の例外: " + type(exc).__name__
+check("3人以上" in msg, f"双2人: 読み上げられる文で断る({msg})")
+check(not e.state.generated, "双2人: 断った後は未生成のまま")
+
+bad_files = [
+    ("リスト", []),
+    ("payload の無い操作", {"format_version": 1, "actions": [{"kind": "setup"}]}),
+    ("知らない選手の並び順", {"format_version": 1, "actions": [
+        {"kind": "register_players", "payload": {"names": ["A", "B"]}},
+        {"kind": "set_order", "payload": {"order": ["p9", "p1"]}}]}),
+    ("偶数のセット数", {"format_version": 1, "actions": [
+        {"kind": "setup", "payload": {
+            "title": "T", "format": "single_elim", "best_of_default": 4,
+            "best_of_finals": 5, "gf_reset": True, "third_place": False}}]}),
+    ("17人", {"format_version": 1, "actions": [
+        {"kind": "register_players",
+         "payload": {"names": [str(i) for i in range(17)]}},
+        {"kind": "generate", "payload": {}}]}),
+]
+for label, data in bad_files:
+    kind = "読めてしまった"
+    try:
+        TournamentEngine.from_dict(data)
+    except EngineError:
+        kind = "EngineError"
+    except Exception as exc:
+        kind = type(exc).__name__
+    check(kind == "EngineError", f"壊れたデータ({label}): {kind}")
+
+bad_path = Path(__file__).parent / "tmp_bad.json"
+bad_path.write_text("{ これは JSON ではない", encoding="utf-8")
+kind = "読めてしまった"
+try:
+    TournamentEngine.load(bad_path)
+except EngineError:
+    kind = "EngineError"
+except Exception as exc:
+    kind = type(exc).__name__
+bad_path.unlink()
+check(kind == "EngineError", f"JSON でないファイル: {kind}")
+
+# 保存は一時ファイル経由(途中の .tmp を残さない)
+e = new_engine(Format.SINGLE_ELIM, names_n(4))
+e.save(save_path)
+check(not save_path.with_name(save_path.name + ".tmp").exists(),
+      "保存: 一時ファイルが残らない")
+check(sig(TournamentEngine.load(save_path)) == sig(e), "保存: 上書きして読み直せる")
+
+# ---------- L. 終了時の読み上げと並び ----------
+note("=== L. 終了時の読み上げと並び ===")
+e = new_engine(Format.ROUND_ROBIN, ["A", "B", "C"])
+rr_report(e, "p1", "p2")
+rr_report(e, "p1", "p3")
+rr_report(e, "p2", "p3")  # 最後の試合の勝者(B)は優勝者(A)ではない
+last = [m for m in e.state.matches.values()
+        if frozenset(m.players()) == frozenset(("p2", "p3"))][0]
+ann = textgen.report_announcement(e.state, last)
+note("TXT: " + ann)
+check("全試合終了" in ann and "Aの優勝" in ann,
+      "リーグ: 最後の試合の勝者でなくても優勝者を読む")
+
+e = new_engine(Format.ROUND_ROBIN, ["A", "B", "C"])
+rr_report(e, "p1", "p2")
+rr_report(e, "p2", "p3")
+ann = textgen.report_announcement(e.state, e.state.matches[
+    [m.match_id for m in e.state.matches.values()
+     if frozenset(m.players()) == frozenset(("p2", "p3"))][0]])
+check("全試合終了" not in ann, "リーグ: 途中では終了と言わない")
+rr_report(e, "p3", "p1")  # 3すくみ
+last = [m for m in e.state.matches.values()
+        if frozenset(m.players()) == frozenset(("p1", "p3"))][0]
+ann = textgen.report_announcement(e.state, last)
+note("TXT: " + ann)
+check("同率首位" in ann, "リーグ: 同率首位で終わったことを読む")
+
+e = new_engine(Format.SINGLE_ELIM, ["A", "B", "C", "D"], third_place=True)
+e.report("W1-1", 1, 2, 0)
+e.report("W1-2", 1, 2, 0)
+need = e.state.matches["3P"].best_of // 2 + 1
+e.report("3P", 1, need, 0)
+ann = textgen.report_announcement(e.state, e.state.matches["3P"])
+note("TXT: " + ann)
+check("3位" in ann and "4位" in ann and "敗退" not in ann,
+      "3位決定戦: 3位と4位を読む")
+
+e = new_engine(Format.SINGLE_ELIM, names_n(16))
+for m in list(e.ready_matches()):
+    e.report(m.match_id, 1, 2, 0)  # 上位シードが全部勝つ → 選手9〜16が敗退
+groups = standings.elimination_groups(e.state)
+check(groups[0][2] == [f"p{i}" for i in range(9, 17)],
+      f"敗退者の並びはシード順(p9 が p10 より前): {groups[0][2]}")
+play_all(e)
+tail = [pid for p, pid in standings.final_placements(e.state) if p == 9]
+check(tail == [f"p{i}" for i in range(9, 17)],
+      f"同じ順位の並びはシード順: {tail}")
+
 # ---------- 結果出力 ----------
 out = Path(__file__).parent / "result_domain.txt"
 LINES.append("")

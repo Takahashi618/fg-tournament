@@ -38,11 +38,9 @@ def build_view(engine, index: int):
         else:
             rows = [("対戦可能な試合はありません。", (None, None))]
     else:
-        rows = [(line, (None, None)) for line in standings_lines(engine)]
+        rows = [(line, (None, None))
+                for line in textgen.standings_lines(st)]
     if not rows:
         rows = [("表示する項目がありません。", (None, None))]
     return title, rows
 
-
-def standings_lines(engine) -> list[str]:
-    return textgen.standings_lines(engine.state)

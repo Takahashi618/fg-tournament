@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -21,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 
 from domain import Config, Format, TournamentEngine
 from publish import exporter
-from publish.uploader import Publisher
+from publish.uploader import Publisher, is_safe_relay_url, viewer_url_for
 
 LINES: list[str] = []
 TOTAL = 0
@@ -102,6 +103,8 @@ check(snap2["placements"] is not None, "確定順位あり")
 note("=== uploader ===")
 
 STORE: dict[str, bytes] = {}
+ARRIVED: list = []
+SLOW = threading.Event()
 
 
 class StubHandler(BaseHTTPRequestHandler):
@@ -119,9 +122,17 @@ class StubHandler(BaseHTTPRequestHandler):
         key = self.headers.get("X-Admin-Key", "")
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
+        action = q.get("action", [""])[0]
         if key != "testkey":
             self._send(403, {"ok": False, "error": "auth failed"})
             return
+        if action == "delete":
+            STORE.pop(token, None)
+            self._send(200, {"ok": True})
+            return
+        if SLOW.is_set():
+            time.sleep(0.3)  # 送信中に次の依頼が重なる状況を作る
+        ARRIVED.append(json.loads(body.decode("utf-8")).get("seq"))
         STORE[token] = body
         self._send(200, {"ok": True})
 
@@ -154,8 +165,55 @@ check(not ok2 and "403" in msg2, f"認証失敗を検出: {msg2}")
 
 pub2 = Publisher(tmp_dir)
 check(pub2.token == tok, "publish_state.json から状態を復元")
+check(not (tmp_dir / "publish_state.json.tmp").exists(),
+      "公開状態の保存: 一時ファイルが残らない")
+
+# 続けて頼んでも、古い内容が後から届いて上書きしない
+pub.get_admin_key = lambda: "testkey"  # keyring を使わずに送る
+ARRIVED.clear()
+SLOW.set()
+results: list = []
+finished = threading.Event()
+
+
+def on_done(ok: bool, _msg: str) -> None:
+    results.append(ok)
+    if len(results) == 5:
+        finished.set()
+
+
+for seq in range(1, 6):
+    pub.upload_async(dict(snap, seq=seq), on_done)
+finished.wait(10)
+SLOW.clear()
+check(len(results) == 5 and all(results), f"連続送信: 5件とも結果が返る({results})")
+check(ARRIVED == sorted(ARRIVED), f"連続送信: 届いた順が頼んだ順({ARRIVED})")
+check(json.loads(STORE[tok].decode("utf-8")).get("seq") == 5,
+      "連続送信: サーバーに残るのは最後の内容")
+check(len(ARRIVED) < 5, f"連続送信: 待ちの間の古い内容は送らない({len(ARRIVED)}回送信)")
+
+# 閲覧URLを作り直したときの、古い内容の削除
+okd, msgd = pub.delete_remote(tok, admin_key="testkey")
+check(okd and tok not in STORE, f"古い閲覧データの削除: {msgd}")
+okd2, msgd2 = pub.delete_remote(tok, admin_key="wrongkey")
+check(not okd2 and "403" in msgd2, f"削除も管理キーが要る: {msgd2}")
 
 server.shutdown()
+
+# 管理キーを暗号化せずに送らない(https だけ。このPC自身への http は確認用に通す)
+for url, expected in (("https://example.com/r.php", True),
+                      ("http://example.com/r.php", False),
+                      ("http://127.0.0.1:8000/r.php", True),
+                      ("http://localhost/r.php", True),
+                      ("ftp://example.com/r.php", False),
+                      ("example.com/r.php", False),
+                      ("", False)):
+    check(is_safe_relay_url(url) is expected, f"relay のURLの検査: {url!r} → {expected}")
+pub.relay_url = "http://example.com/tournament_relay.php"
+ok4, msg4 = pub.upload_now(snap, admin_key="testkey")
+check(not ok4 and "https" in msg4, f"http の relay へは送らない: {msg4}")
+check(viewer_url_for("https://example.com/x/relay.php", "abc")
+      == "https://example.com/x/viewer.html?t=abc", "閲覧URLの組み立て")
 
 # relay のURLは既定で空(特定のサーバーへ送らない)
 empty_dir = Path(tempfile.mkdtemp())
@@ -175,8 +233,11 @@ for marker in ('lang="ja"', 'aria-live="polite"', 'scope', "action=get",
     check(marker in viewer, f"viewer.html に {marker}")
 relay = (ROOT / "web" / "tournament_relay.php").read_text(encoding="utf-8")
 for marker in ("hash_equals", "preg_match", "LOCK_EX", "X_ADMIN_KEY",
-               "MAX_BYTES"):
+               "MAX_BYTES", "'delete'", "require_admin"):
     check(marker in relay, f"relay.php に {marker}")
+check("diag" not in relay, "relay.php に認証なしの診断用の入口が無い")
+check(relay.count("require_admin();") == 2,
+      "relay.php の put と delete が管理キーを確かめる")
 
 # ---------- 結果出力 ----------
 out = Path(__file__).parent / "result_publish.txt"

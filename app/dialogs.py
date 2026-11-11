@@ -14,6 +14,8 @@ import wx
 
 from domain import Config, Format
 from domain import textgen
+from publish.uploader import (URL_SCHEME_MESSAGE, is_safe_relay_url,
+                              new_token, viewer_url_for)
 
 _FORMATS = [
     ("ダブルエリミネーション", Format.DOUBLE_ELIM),
@@ -132,15 +134,16 @@ class PlayersDialog(wx.Dialog):
     """選手登録。OKなら get_names() で名前リストを返す。
     入力欄でEnterを押すたびに、確定した名前と現在の人数を読み上げる。"""
 
-    def __init__(self, parent, speaker):
+    def __init__(self, parent, speaker, min_players: int = 2):
         super().__init__(parent, title="選手登録", size=(560, 520))
         self._speaker = speaker
+        self._min = min_players
         panel = wx.Panel(self)
         panel.SetName("選手登録")
         s = wx.BoxSizer(wx.VERTICAL)
 
         lbl = wx.StaticText(panel,
-                            label="選手名を1行に1人ずつ入力(2〜16人)")
+                            label=f"選手名を1行に1人ずつ入力({min_players}〜16人)")
         s.Add(lbl, 0, wx.ALL, 8)
         self.text = wx.TextCtrl(panel, style=wx.TE_MULTILINE)
         self.text.SetName("選手名入力。1行に1人")
@@ -192,9 +195,13 @@ class PlayersDialog(wx.Dialog):
     def _on_ok(self):
         names = [ln.strip() for ln in self.text.GetValue().splitlines()
                  if ln.strip()]
-        if not (2 <= len(names) <= 16):
-            wx.MessageBox("選手は2人から16人までです。", "エラー",
+        if not (self._min <= len(names) <= 16):
+            msg = f"選手は{self._min}人から16人までです。"
+            if self._min > 2:
+                msg = "ダブルエリミネーションでは、" + msg
+            wx.MessageBox(msg + f"いまは{len(names)}人です。", "エラー",
                           wx.OK | wx.ICON_ERROR, self)
+            self.text.SetFocus()
             return
         if len(names) != len(set(names)):
             wx.MessageBox("選手名が重複しています。", "エラー",
@@ -425,7 +432,7 @@ HELP_LINES = [
     "Enter: 選択した試合の結果入力。入力済みの試合なら修正",
     "F5: 全体状況の読み上げ",
     "F6: ビュー切替(ラウンド別 → 選手別 → 次の試合 → 順位)",
-    "Ctrl+Z: 直前の結果入力の取り消し",
+    "Ctrl+Z: 直前の結果入力または修正の取り消し",
     "Ctrl+N: 新規大会の作成",
     "Ctrl+O: 大会ファイルを開く",
     "Ctrl+S: 上書き保存 / Ctrl+Shift+S: 名前を付けて保存",
@@ -472,12 +479,18 @@ class HelpDialog(wx.Dialog):
 
 
 class PublishDialog(wx.Dialog):
-    """オンライン公開の設定。OKで publisher に保存済み。"""
+    """オンライン公開の設定。「保存」で publisher に書き込む。
+    キャンセルしたときは何も変えない(閲覧URLの作り直しも保存するまで確定しない)。
+
+    閲覧URLを作り直して保存したとき、retired に作り直す前の
+    (relay のURL, トークン) が入る。呼び出し側がサーバーの古い内容を消す。"""
 
     def __init__(self, parent, publisher):
         super().__init__(parent, title="公開設定(オンライン閲覧)",
                          size=(680, 560))
         self._pub = publisher
+        self._new_token = ""   # 発行ボタンで作った、まだ保存していないトークン
+        self.retired = None
         panel = wx.Panel(self)
         panel.SetName("公開設定")
         s = wx.BoxSizer(wx.VERTICAL)
@@ -488,7 +501,7 @@ class PublishDialog(wx.Dialog):
         self.enable_check.SetValue(publisher.enabled)
         s.Add(self.enable_check, 0, wx.ALL, 8)
 
-        lbl = wx.StaticText(panel, label="relay のURL")
+        lbl = wx.StaticText(panel, label="relay のURL(https:// で始まるもの)")
         s.Add(lbl, 0, wx.LEFT | wx.TOP, 8)
         self.url_ctrl = wx.TextCtrl(panel, value=publisher.relay_url)
         self.url_ctrl.SetName("relayのURL")
@@ -509,67 +522,79 @@ class PublishDialog(wx.Dialog):
         s.Add(self.viewer_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
         btns = wx.BoxSizer(wx.HORIZONTAL)
-        self.issue_btn = wx.Button(panel, label="閲覧URLを発行(再発行)")
-        self.issue_btn.SetName("閲覧URLを発行")
+        issue_btn = wx.Button(panel, label="閲覧URLを発行(再発行)")
+        issue_btn.SetName("閲覧URLを発行")
         ok = wx.Button(panel, label="保存")
         ok.SetName("保存")
         cancel = wx.Button(panel, label="キャンセル")
         cancel.SetName("キャンセル")
-        btns.Add(self.issue_btn, 0, wx.ALL, 8)
+        btns.Add(issue_btn, 0, wx.ALL, 8)
         btns.Add(ok, 0, wx.ALL, 8)
         btns.Add(cancel, 0, wx.ALL, 8)
         s.Add(btns, 0, wx.ALIGN_CENTER)
         panel.SetSizer(s)
 
-        self.issue_btn.Bind(wx.EVT_BUTTON, lambda e: self._on_issue())
+        issue_btn.Bind(wx.EVT_BUTTON, lambda e: self._on_issue())
         ok.Bind(wx.EVT_BUTTON, lambda e: self._on_ok())
         cancel.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CANCEL))
         panel.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self.enable_check.SetFocus()
 
-    def _update_viewer_url(self):
-        if self._pub.token and self._pub.relay_url:
-            self.viewer_ctrl.SetValue(self._pub.viewer_url())
-        else:
-            self.viewer_ctrl.SetValue("未発行(発行ボタンで作成)")
+    def _url(self) -> str:
+        """入力欄のURL。空なら保存済みのURL。"""
+        return self.url_ctrl.GetValue().strip() or self._pub.relay_url
 
-    def _require_relay_url(self) -> bool:
-        """relay のURLが入っていなければ知らせて入力欄へ戻す。"""
-        if self.url_ctrl.GetValue().strip() or self._pub.relay_url:
+    def _token(self) -> str:
+        return self._new_token or self._pub.token
+
+    def _update_viewer_url(self):
+        url = viewer_url_for(self._url(), self._token())
+        self.viewer_ctrl.SetValue(url or "未発行(発行ボタンで作成)")
+
+    def _check_relay_url(self) -> bool:
+        """relay のURLが使えるものでなければ知らせて入力欄へ戻す。"""
+        url = self._url()
+        if not url:
+            msg = "relayのURLを入力してください。"
+        elif not is_safe_relay_url(url):
+            msg = URL_SCHEME_MESSAGE + "。"
+        else:
             return True
-        wx.MessageBox("relayのURLを入力してください。", "公開設定",
-                      wx.OK | wx.ICON_WARNING, self)
+        wx.MessageBox(msg, "公開設定", wx.OK | wx.ICON_WARNING, self)
         self.url_ctrl.SetFocus()
         return False
 
     def _on_issue(self):
-        if not self._require_relay_url():
+        if not self._check_relay_url():
             return
-        if self._pub.token:
+        if self._pub.token and not self._new_token:
             ans = wx.MessageBox(
-                "既存の閲覧URLは使えなくなります。再発行しますか?",
+                "閲覧URLを作り直します。「保存」を押すと、今の閲覧URLは"
+                "見られなくなります。作り直しますか?",
                 "確認", wx.YES_NO | wx.ICON_QUESTION, self)
             if ans != wx.YES:
                 return
-        # URL生成にはこの時点の relay URL を反映する
-        self._pub.relay_url = (self.url_ctrl.GetValue().strip()
-                               or self._pub.relay_url)
-        self._pub.ensure_token(rotate=True)
+        self._new_token = new_token()
         self._update_viewer_url()
         self.viewer_ctrl.SetFocus()
 
     def _on_ok(self):
-        if self.enable_check.GetValue() and not self._require_relay_url():
+        enabled = self.enable_check.GetValue()
+        # 無効にして保存するだけなら、URLが空でもよい
+        if (enabled or self._url()) and not self._check_relay_url():
             return
-        url = self.url_ctrl.GetValue().strip()
-        if url:
-            self._pub.relay_url = url
+        old = (self._pub.relay_url, self._pub.token)
+        self._pub.relay_url = self._url()
         key = self.key_ctrl.GetValue().strip()
         if key:
             self._pub.set_admin_key(key)
-        self._pub.enabled = self.enable_check.GetValue()
-        if self._pub.enabled and not self._pub.token:
-            self._pub.ensure_token()
+        self._pub.enabled = enabled
+        if self._new_token:
+            self._pub.token = self._new_token
+            if old[0] and old[1]:
+                self.retired = old
+        elif enabled and not self._pub.token:
+            self._pub.token = new_token()
         self._pub.save()
         self.EndModal(wx.ID_OK)
 
@@ -578,10 +603,8 @@ class PublishDialog(wx.Dialog):
         if code == wx.WXK_ESCAPE:
             self.EndModal(wx.ID_CANCEL)
             return
+        # ボタンの上の Enter はボタン自身が受けるので、ここには来ない
         if _is_enter(code):
-            if wx.Window.FindFocus() is self.issue_btn:
-                self._on_issue()
-            else:
-                self._on_ok()
+            self._on_ok()
             return
         event.Skip()

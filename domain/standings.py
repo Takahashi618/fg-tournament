@@ -130,11 +130,18 @@ def elimination_groups(state: TournamentState) -> list[tuple[Phase, int, list[st
             continue
         grouped[key].append(pid)
         meta[key] = (ph, rn)
+    seed_of = _seed_map(state)
     out: list[tuple[Phase, int, list[str]]] = []
     for key in sorted(grouped.keys(), reverse=True):
         ph, rn = meta[key]
-        out.append((ph, rn, sorted(grouped[key])))
+        out.append((ph, rn, sorted(grouped[key], key=seed_of)))
     return out
+
+
+def _seed_map(state: TournamentState):
+    """同じ順位・同じ敗退ラウンドの中を並べるキー(並び順=シード順)。"""
+    seeds = {p.player_id: p.seed for p in state.players}
+    return lambda pid: seeds.get(pid, 999)
 
 
 def final_placements(state: TournamentState) -> list[tuple[int, str]]:
@@ -170,17 +177,18 @@ def final_placements(state: TournamentState) -> list[tuple[int, str]]:
         by_stage[st].append(pid)
 
     total = len(state.players)
+    seed_of = _seed_map(state)
     placements: list[tuple[int, str]] = []
     cum = 0
     for st in sorted(by_stage.keys()):
-        members = sorted(by_stage[st])
+        members = by_stage[st]
         cum += len(members)
         place = total - cum + 1
         for pid in members:
             placements.append((place, pid))
     if champ:
         placements.append((1, champ))
-    placements.sort(key=lambda t: (t[0], t[1]))
+    placements.sort(key=lambda t: (t[0], seed_of(t[1])))
     return placements
 
 
