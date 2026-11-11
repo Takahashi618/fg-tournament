@@ -1,7 +1,7 @@
 """アプリ層スモークテスト(ウィンドウ表示なし)。
 
 TOURNEY_SILENT=1 を設定した上で、全モジュールのコンパイル、
-ビュー生成、フレームと全ダイアログの構築・破棄を確認する。
+ビュー生成、フレームと全ダイアログの構築・破棄、言語の切り替えを確認する。
 結果は tests/result_app_smoke.txt に出力。終了コード: 失敗ありなら1。
 """
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import py_compile
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -35,7 +36,7 @@ def check(cond: bool, label: str) -> None:
 def run() -> None:
     # 1) コンパイル確認
     targets = []
-    for sub in ("domain", "app"):
+    for sub in ("domain", "app", "i18n", "publish"):
         targets += sorted((ROOT / sub).glob("*.py"))
     for t in targets:
         try:
@@ -125,7 +126,7 @@ def run() -> None:
     dialogs.wx.MessageBox = lambda msg, *a, **k: boxes.append(msg) or wx.YES
     try:
         # ダブルエリミネーションは3人から(選手登録の画面で断る)
-        d = PlayersDialog(frame, frame.speaker, min_players=3)
+        d = PlayersDialog(frame, frame.speaker, Format.DOUBLE_ELIM)
         ended: list[int] = []
         d.EndModal = ended.append
         d.text.SetValue("田中\n鈴木")
@@ -198,6 +199,87 @@ def run() -> None:
     finally:
         app_main.DATA_DIR = real_dir
         shutil.rmtree(tmp, ignore_errors=True)
+
+    # 言語の切り替え(設定は一時フォルダへ保存し、最後に元へ戻す)
+    import i18n
+    import app.main as main_mod
+    from app import settings
+    saved_data_dir = main_mod.DATA_DIR
+    spoken: list[str] = []
+    frame._announce = lambda text, delay_ms=200: spoken.append(text)
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            main_mod.DATA_DIR = Path(tmp)
+            frame._on_language("en")
+            check(i18n.get_language() == "en", "英語に切り替え")
+            mb = frame.GetMenuBar()
+            # すべてのメニューと項目が英語に付け替わる
+            labels_ok = True
+            for pos, (title_key, items) in enumerate(main_mod._MENUS):
+                if mb.GetMenuLabel(pos) != i18n.t(title_key):
+                    labels_ok = False
+                for item in items or ():
+                    if item is not None and mb.GetLabel(item[0]) != i18n.t(item[1]):
+                        labels_ok = False
+            check(labels_ok and mb.GetMenuLabel(0) == "&File",
+                  f"英語: すべてのメニュー({mb.GetMenuLabel(0)})")
+            check(frame.view_label.GetLabel() == views.view_title(frame.view_index)
+                  and views.view_title(0) == "Matches by Round", "英語: ビュー名")
+            check("FG Tournament Manager" in frame.GetTitle(), "英語: ウィンドウ名")
+            # 読み込みは OS の言語に戻ることもあるので、ファイルの中身で確かめる
+            import configparser
+            saved_ini = configparser.ConfigParser()
+            saved_ini.read(Path(tmp) / "settings.ini", encoding="utf-8")
+            check(saved_ini.get("app", "language", fallback="") == "en"
+                  and settings.load_language(main_mod.DATA_DIR) == "en"
+                  and not list(Path(tmp).glob("*.json")),
+                  "言語の設定を settings.ini に保存(*.json の一覧に混ざらない)")
+            check(spoken and "[Warning]" not in spoken[-1], "英語: 切り替えの読み上げ")
+            d = SetupDialog(frame)
+            d.Destroy()
+            d = PlayersDialog(frame, frame.speaker, Format.DOUBLE_ELIM)
+            d.Destroy()
+            d = ResultDialog(frame, eng.state, eng.ready_matches()[0])
+            d.Destroy()
+            d = ResultDialog(frame, eng.state, eng.state.matches["W1-1"],
+                             editing=True)
+            d.Destroy()
+            d = HelpDialog(frame)
+            check(d.listbox.GetCount() == len(i18n.t("help.lines").split("\n")),
+                  "英語: キー操作一覧")
+            d.Destroy()
+            check(True, "英語: ダイアログ構築")
+
+            # 閲覧ページへ送る「直前の出来事」は、言語を切り替えるとその言語で作り直す
+            frame.engine = eng
+            target = eng.ready_matches()[0]
+            frame._ask_result = lambda m, editing: {
+                "winner_slot": 1, "score1": target.best_of // 2 + 1,
+                "score2": 0, "forfeit": False}
+            frame._do_report(target)
+            event_en = frame._build_snapshot()["last_event"]
+            frame._on_language("ja")
+            saved_ini.read(Path(tmp) / "settings.ini", encoding="utf-8")
+            check(saved_ini.get("app", "language", fallback="") == "ja",
+                  "日本語に戻した設定も保存")
+            event_ja = frame._build_snapshot()["last_event"]
+            check(event_en.startswith(eng.state.name_of(
+                      eng.state.matches[target.match_id].winner_id()) + " wins")
+                  and "の勝ち" in event_ja,
+                  f"直前の出来事を今の言語で作り直す({event_en} / {event_ja})")
+            frame._on_language("en")
+
+            # 設定を保存できないときは、切り替えたうえで警告する
+            blocker = Path(tmp) / "blocked"
+            blocker.write_text("x", encoding="utf-8")
+            main_mod.DATA_DIR = blocker / "data"  # ファイルの下にはフォルダを作れない
+            frame._on_language("ja")
+            check(i18n.get_language() == "ja"
+                  and mb.GetMenuLabel(0) == "ファイル(&F)", "日本語に戻す")
+            check("[警告]" in spoken[-1], f"保存できないときは警告する({spoken[-1]})")
+        finally:
+            main_mod.DATA_DIR = saved_data_dir
+            i18n.set_language("ja")
 
     frame.Destroy()
     check(True, "破棄完了")

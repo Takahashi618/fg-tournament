@@ -5,13 +5,14 @@
 """
 from __future__ import annotations
 
-from .models import Config, Match, Phase, Player, Slot, SourceType
+from .models import MIN_PLAYERS, Config, Match, Phase, Player, Slot, SourceType
 
 
 def build_round_robin(ordered_players: list[Player], config: Config) -> list[Match]:
     n = len(ordered_players)
-    if n < 2:
-        raise ValueError("リーグ戦は2人以上が必要です")
+    if n < MIN_PLAYERS:
+        # 利用者向けの人数チェックは engine.check_player_count が先に行う
+        raise ValueError(f"a round robin needs at least {MIN_PLAYERS} players")
 
     work: list[str] = [p.player_id for p in ordered_players]
     if len(work) % 2 == 1:

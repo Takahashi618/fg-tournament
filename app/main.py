@@ -2,6 +2,7 @@
 
 キーボードのみで全操作が完結する、スクリーンリーダー前提の大会運営コンソール。
 4ビュー(F6切替) + 結果入力/修正 + undo + 保存読込。
+表示と読み上げの言語は言語メニューで切り替える(日本語 / English)。
 """
 from __future__ import annotations
 
@@ -9,24 +10,28 @@ import datetime
 import re
 import sys
 from pathlib import Path
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import wx
 
-from app import views
+from app import settings, views
 from app.dialogs import (HelpDialog, ImpactConfirmDialog, OrderDialog,
                          PlayersDialog, PublishDialog, ResultDialog,
                          SetupDialog)
 from app.speech import Speaker
-from domain import EngineError, Format, MatchState, TournamentEngine
+from domain import EngineError, MatchState, TournamentEngine
 from domain import textgen
 from publish import exporter
+from i18n import LANGUAGES, get_language, set_language, t
 from publish.uploader import Publisher
 
-APP_NAME = "格ゲー大会マネージャー"
-APP_VERSION = "1.0.4"
-APP_TITLE = f"{APP_NAME} v{APP_VERSION}"
+APP_VERSION = "1.1.0"
+
+
+def app_title() -> str:
+    return f"{t('app.name')} v{APP_VERSION}"
 
 
 def _resolve_data_dir() -> Path:
@@ -47,17 +52,50 @@ ID_SAVEAS = wx.NewIdRef()
 ID_PUBLISH = wx.NewIdRef()
 ID_UPLOAD = wx.NewIdRef()
 ID_COPYURL = wx.NewIdRef()
+ID_LANGS = {code: wx.NewIdRef() for code in LANGUAGES}
+
+# メニューバーの構成(左から順): (メニュー名のキー, 項目の一覧)。
+# 項目は (ID, 文言キー)、None は区切り線。項目が None のメニューは言語の切り替え。
+# メニューを作るとき(_build_menu)と言語を切り替えるとき(_apply_language)の両方がこの表を使う。
+_MENUS = [
+    ("menu.file", [
+        (wx.ID_NEW, "menu.new"),
+        (wx.ID_OPEN, "menu.open"),
+        (wx.ID_SAVE, "menu.save"),
+        (ID_SAVEAS, "menu.save_as"),
+        None,
+        (wx.ID_EXIT, "menu.exit"),
+    ]),
+    ("menu.tournament", [
+        (ID_INPUT, "menu.input"),
+        (ID_UNDO, "menu.undo"),
+        None,
+        (ID_SUMMARY, "menu.summary"),
+        (ID_VIEW, "menu.view"),
+    ]),
+    ("menu.publish", [
+        (ID_PUBLISH, "menu.publish_settings"),
+        (ID_UPLOAD, "menu.upload"),
+        (ID_COPYURL, "menu.copy_url"),
+    ]),
+    ("menu.language", None),
+    ("menu.help", [
+        (ID_HELP, "menu.keys"),
+    ]),
+]
 
 
 class MainFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title=APP_TITLE, size=(960, 660))
+        super().__init__(None, title=app_title(), size=(960, 660))
         self.engine = TournamentEngine()
         self.speaker = Speaker()
         self.publisher = Publisher(DATA_DIR)
         self.file_path: Path | None = None
         self.view_index = 0
-        self._last_event: str | None = None
+        # 公開時に閲覧ページへ送る「直前の出来事」の文。言語を切り替えても
+        # その言語で作り直せるよう、文ではなく文を作る関数を持つ
+        self._last_event: Callable[[], str] | None = None
         self._rows: list[tuple[str, tuple]] = []
         self._build_menu()
         self._build_ui()
@@ -68,35 +106,24 @@ class MainFrame(wx.Frame):
 
     def _build_menu(self):
         menubar = wx.MenuBar()
-
-        m_file = wx.Menu()
-        m_file.Append(wx.ID_NEW, "新規大会の作成(&N)\tCtrl+N")
-        m_file.Append(wx.ID_OPEN, "開く(&O)\tCtrl+O")
-        m_file.Append(wx.ID_SAVE, "上書き保存(&S)\tCtrl+S")
-        m_file.Append(ID_SAVEAS, "名前を付けて保存(&A)\tCtrl+Shift+S")
-        m_file.AppendSeparator()
-        m_file.Append(wx.ID_EXIT, "終了(&X)")
-        menubar.Append(m_file, "ファイル(&F)")
-
-        m_game = wx.Menu()
-        m_game.Append(ID_INPUT, "選択中の試合の結果入力・修正(&E)")
-        m_game.Append(ID_UNDO, "直前の結果入力・修正を取り消し(&U)\tCtrl+Z")
-        m_game.AppendSeparator()
-        m_game.Append(ID_SUMMARY, "全体状況を読み上げ(&R)\tF5")
-        m_game.Append(ID_VIEW, "ビュー切替(&V)\tF6")
-        menubar.Append(m_game, "大会(&T)")
-
-        m_pub = wx.Menu()
-        m_pub.Append(ID_PUBLISH, "公開設定(&S)...")
-        m_pub.Append(ID_UPLOAD, "今すぐアップロード(&U)\tCtrl+U")
-        m_pub.Append(ID_COPYURL, "閲覧URLをコピー(&L)")
-        menubar.Append(m_pub, "公開(&P)")
-
-        m_help = wx.Menu()
-        m_help.Append(ID_HELP, "キー操作一覧(&K)\tF1")
-        menubar.Append(m_help, "ヘルプ(&H)")
-
+        for title_key, items in _MENUS:
+            menu = wx.Menu()
+            if items is None:
+                # 言語名はどちらの言語でも、その言語自身の表記で出す
+                for code, name in LANGUAGES.items():
+                    menu.AppendRadioItem(ID_LANGS[code], name)
+                menu.Check(ID_LANGS[get_language()], True)
+            else:
+                for item in items:
+                    if item is None:
+                        menu.AppendSeparator()
+                    else:
+                        menu.Append(item[0], t(item[1]))
+            menubar.Append(menu, t(title_key))
         self.SetMenuBar(menubar)
+        for code, mid in ID_LANGS.items():
+            self.Bind(wx.EVT_MENU,
+                      lambda e, c=code: self._on_language(c), id=mid)
         self.Bind(wx.EVT_MENU, lambda e: self._on_new(), id=wx.ID_NEW)
         self.Bind(wx.EVT_MENU, lambda e: self._on_open(), id=wx.ID_OPEN)
         self.Bind(wx.EVT_MENU, lambda e: self._on_save(False), id=wx.ID_SAVE)
@@ -114,13 +141,13 @@ class MainFrame(wx.Frame):
 
     def _build_ui(self):
         panel = wx.Panel(self)
-        panel.SetName("メイン")
+        panel.SetName(t("main.panel"))
         self.panel = panel
         s = wx.BoxSizer(wx.VERTICAL)
-        self.view_label = wx.StaticText(panel, label=views.VIEW_TITLES[0])
+        self.view_label = wx.StaticText(panel, label=views.view_title(0))
         s.Add(self.view_label, 0, wx.ALL, 6)
         self.listbox = wx.ListBox(panel)
-        self.listbox.SetName(views.VIEW_TITLES[0])
+        self.listbox.SetName(views.view_title(0))
         s.Add(self.listbox, 1, wx.EXPAND | wx.ALL, 6)
         panel.SetSizer(s)
         panel.Bind(wx.EVT_CHAR_HOOK, self._on_key)
@@ -142,11 +169,11 @@ class MainFrame(wx.Frame):
         self.view_label.SetLabel(title)
         self.listbox.SetName(title)
         if self.engine.state.generated:
-            self.SetTitle(f"{self.engine.state.config.title} - {APP_TITLE}")
+            self.SetTitle(f"{self.engine.state.config.title} - {app_title()}")
         else:
-            self.SetTitle(APP_TITLE)
+            self.SetTitle(app_title())
         if speak_title:
-            self._announce(f"ビュー: {title}。{len(rows)}件")
+            self._announce(t("msg.view", title=title, n=len(rows)))
 
     def _announce(self, text: str, delay_ms: int = 200) -> None:
         """一覧更新の直後はPC-Talkerが選択項目を自動で読み上げて割り込むため、
@@ -154,8 +181,40 @@ class MainFrame(wx.Frame):
         wx.CallLater(delay_ms, self.speaker.say, text)
 
     def _on_switch_view(self):
-        self.view_index = (self.view_index + 1) % len(views.VIEW_TITLES)
+        self.view_index = (self.view_index + 1) % views.VIEW_COUNT
         self._refresh(keep_selection=False, speak_title=True)
+
+    # ---------- 言語 ----------
+
+    def _on_language(self, code: str):
+        """表示と読み上げの言語を切り替える。メニューは作り直さずラベルを付け替える
+        (メニューのイベント処理中にメニューバーを破棄しないため)。"""
+        if code == get_language():
+            return
+        set_language(code)
+        try:
+            settings.save_language(DATA_DIR, code)
+            saved = True
+        except Exception:
+            saved = False
+        self._apply_language()
+        msg = t("msg.language_changed")
+        if not saved:
+            # 切り替えはできたが、次の起動に引き継げないことを伝える
+            msg = t("sentence_sep").join(
+                [msg, t("speech.warn", text=t("msg.language_save_failed"))])
+        self._announce(msg)
+
+    def _apply_language(self):
+        menubar = self.GetMenuBar()
+        for pos, (title_key, items) in enumerate(_MENUS):
+            menubar.SetMenuLabel(pos, t(title_key))
+            for item in items or ():
+                if item is not None:
+                    menubar.SetLabel(item[0], t(item[1]))
+        menubar.Check(ID_LANGS[get_language()], True)
+        self.panel.SetName(t("main.panel"))
+        self._refresh()
 
     def _on_key(self, event):
         code = event.GetKeyCode()
@@ -188,12 +247,11 @@ class MainFrame(wx.Frame):
               and not m.result.auto_bye):
             self._do_edit(m)
         elif mstate == MatchState.DONE:
-            self.speaker.info("この試合は不戦で自動消化されています。"
-                              "修正はできません。")
+            self.speaker.info(t("msg.auto_bye_no_edit"))
         elif mstate == MatchState.SKIPPED:
-            self.speaker.info("この試合は実施されません。")
+            self.speaker.info(t("msg.skipped"))
         else:
-            self.speaker.info("対戦者がまだ確定していません。")
+            self.speaker.info(t("msg.pending"))
 
     # ---------- 結果入力・修正 ----------
 
@@ -216,12 +274,16 @@ class MainFrame(wx.Frame):
         except EngineError as exc:
             self.speaker.error(str(exc))
             return
-        ann = textgen.report_announcement(
-            self.engine.state, self.engine.state.matches[m.match_id])
-        self._last_event = ann
+        mid = m.match_id
+
+        def event() -> str:
+            st = self.engine.state
+            return textgen.report_announcement(st, st.matches[mid])
+
+        self._last_event = event
         self._autosave()
         self._refresh()
-        self._announce(ann)
+        self._announce(event())
         self._maybe_auto_upload()
 
     def _do_edit(self, m):
@@ -236,7 +298,7 @@ class MainFrame(wx.Frame):
                 ok = dlg.ShowModal() == wx.ID_OK
                 dlg.Destroy()
                 if not ok:
-                    self.speaker.info("修正を中止しました。")
+                    self.speaker.info(t("msg.edit_cancelled"))
                     return
         try:
             cleared = self.engine.edit_result(
@@ -245,15 +307,21 @@ class MainFrame(wx.Frame):
         except EngineError as exc:
             self.speaker.error(str(exc))
             return
-        ann = textgen.report_announcement(
-            self.engine.state, self.engine.state.matches[m.match_id])
-        msg = "修正しました。" + ann
-        if cleared:
-            msg += f"クリアされた試合は{len(cleared)}件です。"
-        self._last_event = msg
+        mid = m.match_id
+        cleared_count = len(cleared)
+
+        def event() -> str:
+            st = self.engine.state
+            parts = [t("msg.edited"),
+                     textgen.report_announcement(st, st.matches[mid])]
+            if cleared_count:
+                parts.append(t("msg.cleared", n=cleared_count))
+            return t("sentence_sep").join(parts)
+
+        self._last_event = event
         self._autosave()
         self._refresh()
-        self._announce(msg)
+        self._announce(event())
         self._maybe_auto_upload()
 
     # ---------- 大会操作 ----------
@@ -265,18 +333,18 @@ class MainFrame(wx.Frame):
         except EngineError as exc:
             self.speaker.error(str(exc))
             return
-        line = textgen.match_line(self.engine.state,
-                                  self.engine.state.matches[mid])
-        if was_edit:
-            # 修正の取り消しは、修正する前の結果(消えた下流の結果も)へ戻す
-            self._last_event = f"修正の取り消し: {line}"
-            spoken = f"修正を取り消しました。{line}"
-        else:
-            self._last_event = f"結果の取り消し: {line}"
-            spoken = f"取り消しました。{line}"
+
+        def line() -> str:
+            st = self.engine.state
+            return textgen.match_line(st, st.matches[mid])
+
+        # 修正の取り消しは、修正する前の結果(消えた下流の結果も)へ戻す
+        event_key = "msg.edit_undo_event" if was_edit else "msg.undo_event"
+        spoken_key = "msg.edit_undone" if was_edit else "msg.undone"
+        self._last_event = lambda: t(event_key, line=line())
         self._autosave()
         self._refresh()
-        self._announce(spoken)
+        self._announce(t(spoken_key, line=line()))
         self._maybe_auto_upload()
 
     def _on_summary(self):
@@ -295,9 +363,7 @@ class MainFrame(wx.Frame):
         config = sdlg.get_config()
         sdlg.Destroy()
 
-        # ダブルエリミネーションは3人から。人数の不足は選手登録の画面で知らせる
-        min_players = 3 if config.format == Format.DOUBLE_ELIM else 2
-        pdlg = PlayersDialog(self, self.speaker, min_players=min_players)
+        pdlg = PlayersDialog(self, self.speaker, config.format)
         if pdlg.ShowModal() != wx.ID_OK:
             pdlg.Destroy()
             return
@@ -315,7 +381,7 @@ class MainFrame(wx.Frame):
         odlg = OrderDialog(self, eng.state, self.speaker)
         if odlg.ShowModal() != wx.ID_OK:
             odlg.Destroy()
-            self.speaker.info("新規作成を中止しました。")
+            self.speaker.info(t("msg.new_cancelled"))
             return
         order = odlg.get_order()
         odlg.Destroy()
@@ -329,23 +395,23 @@ class MainFrame(wx.Frame):
 
         kept = self._keep_previous_autosave()
         self.engine = eng
+        self._last_event = None  # 前の大会の出来事を新しい大会の閲覧ページに出さない
         self.file_path = None
-        self._last_event = None
         self.view_index = 0
         self._refresh(keep_selection=False)
         self._autosave()
-        msg = "ブラケットを生成しました。" + textgen.overall_summary(eng.state)
+        parts = [t("msg.generated"), textgen.overall_summary(eng.state)]
         if kept:
-            msg += "前の大会の自動保存は、別の名前で data フォルダに残しました。"
-        self._announce(msg, delay_ms=300)
+            parts.append(t("msg.autosave_kept"))
+        self._announce(t("sentence_sep").join(parts), delay_ms=300)
 
     # ---------- 保存・読み込み ----------
 
     def _on_open(self):
         DATA_DIR.mkdir(exist_ok=True)
-        dlg = wx.FileDialog(self, "大会ファイルを開く",
+        dlg = wx.FileDialog(self, t("msg.open_title"),
                             defaultDir=str(DATA_DIR),
-                            wildcard="大会ファイル (*.json)|*.json",
+                            wildcard=t("msg.file_wildcard"),
                             style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST)
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
@@ -355,34 +421,35 @@ class MainFrame(wx.Frame):
         try:
             self.engine = TournamentEngine.load(path)
         except EngineError as exc:
-            self.speaker.error(f"読み込みに失敗しました。{exc}")
+            self.speaker.error(t("msg.load_failed", error=exc))
             return
         except OSError:
-            self.speaker.error("読み込みに失敗しました。ファイルを開けません。")
+            self.speaker.error(t("msg.load_failed",
+                                 error=t("msg.cannot_open_file")))
             return
         except Exception:
-            self.speaker.error("読み込みに失敗しました。"
-                               "大会ファイルの内容が壊れています。")
+            self.speaker.error(t("msg.load_failed",
+                                 error=t("err.broken_file")))
             return
-        self.file_path = path
         self._last_event = None
+        self.file_path = path
         self.view_index = 0
         self._refresh(keep_selection=False)
-        self._announce("読み込みました。"
-                       + textgen.overall_summary(self.engine.state),
-                       delay_ms=300)
+        self._announce(t("sentence_sep").join(
+            [t("msg.loaded"), textgen.overall_summary(self.engine.state)]),
+            delay_ms=300)
 
     def _on_save(self, save_as: bool):
         if not self.engine.state.generated:
-            self.speaker.info("保存する大会がありません。")
+            self.speaker.info(t("msg.nothing_to_save"))
             return
         if save_as or self.file_path is None:
             DATA_DIR.mkdir(exist_ok=True)
             default = self._default_filename()
-            dlg = wx.FileDialog(self, "名前を付けて保存",
+            dlg = wx.FileDialog(self, t("msg.save_as_title"),
                                 defaultDir=str(DATA_DIR),
                                 defaultFile=default,
-                                wildcard="大会ファイル (*.json)|*.json",
+                                wildcard=t("msg.file_wildcard"),
                                 style=(wx.FD_SAVE
                                        | wx.FD_OVERWRITE_PROMPT))
             if dlg.ShowModal() != wx.ID_OK:
@@ -395,16 +462,17 @@ class MainFrame(wx.Frame):
         try:
             self.engine.save(target)
         except Exception:
-            self.speaker.error("保存に失敗しました。"
-                               "保存先に書き込めるか確認してください。")
+            self.speaker.error(t("msg.save_failed",
+                                 error=t("msg.check_writable")))
             return
         # 保存できてから保存先を覚える(失敗した場所へ自動保存し続けない)
         self.file_path = target
-        self.speaker.success(f"保存しました。{target.name}")
+        self.speaker.success(t("msg.saved", name=target.name))
 
     def _default_filename(self) -> str:
         title = self.engine.state.config.title
-        safe = re.sub(r'[\\/:*?"<>|]', "_", title).strip() or "大会"
+        safe = (re.sub(r'[\\/:*?"<>|]', "_", title).strip()
+                or t("setup.default_title"))
         stamp = datetime.date.today().strftime("%Y%m%d")
         return f"{stamp}_{safe}.json"
 
@@ -418,7 +486,7 @@ class MainFrame(wx.Frame):
         try:
             auto.replace(DATA_DIR / f"autosave_backup_{stamp}.json")
         except OSError:
-            self.speaker.warn("前の大会の自動保存を残せませんでした。")
+            self.speaker.warn(t("msg.autosave_keep_failed"))
             return False
         return True
 
@@ -429,14 +497,16 @@ class MainFrame(wx.Frame):
             target = self.file_path or (DATA_DIR / "autosave.json")
             self.engine.save(target)
         except Exception:
-            self.speaker.warn("自動保存に失敗しました。")
+            self.speaker.warn(t("msg.autosave_failed"))
 
 
     # ---------- 公開(オンライン閲覧) ----------
 
     def _build_snapshot(self) -> dict:
         return exporter.build_snapshot(self.engine,
-                                       last_event=self._last_event)
+                                       last_event=(self._last_event()
+                                                   if self._last_event
+                                                   else None))
 
     def _on_publish_settings(self):
         dlg = PublishDialog(self, self.publisher)
@@ -449,39 +519,34 @@ class MainFrame(wx.Frame):
             # 古い閲覧URLの内容をサーバーから消す(消せなければ知らせる)
             def deleted(ok: bool, msg: str):
                 if not ok:
-                    wx.CallAfter(
-                        self.speaker.warn,
-                        "古い閲覧URLの内容をサーバーから消せませんでした。"
-                        "古いURLでは、最後に送った内容が見え続けます。" + msg,
-                        False)
+                    wx.CallAfter(self.speaker.warn,
+                                 t("msg.old_viewer_delete_failed", msg=msg),
+                                 False)
 
             self.publisher.delete_remote_async(retired[1], retired[0], deleted)
         if self.publisher.enabled:
-            self.speaker.say("公開設定を保存しました。公開は有効です。"
-                             "Ctrl+Uでいつでもアップロードできます。")
+            self.speaker.say(t("msg.publish_on"))
         else:
-            self.speaker.say("公開設定を保存しました。公開は無効です。")
+            self.speaker.say(t("msg.publish_off"))
 
     def _on_copy_url(self):
         if not (self.publisher.token and self.publisher.relay_url):
-            self.speaker.info("閲覧URLが未発行です。"
-                              "公開メニューの公開設定から発行してください。")
+            self.speaker.info(t("msg.no_viewer_url"))
             return
         url = self.publisher.viewer_url()
         if wx.TheClipboard.Open():
             wx.TheClipboard.SetData(wx.TextDataObject(url))
             wx.TheClipboard.Close()
-            self.speaker.say("閲覧URLをコピーしました。" + url)
+            self.speaker.say(t("msg.url_copied", url=url))
         else:
-            self.speaker.error("クリップボードを開けませんでした。")
+            self.speaker.error(t("msg.clipboard_failed"))
 
     def _on_upload(self):
         if not self.engine.state.generated:
-            self.speaker.info("アップロードする大会がありません。")
+            self.speaker.info(t("msg.nothing_to_upload"))
             return
         if not self.publisher.enabled:
-            self.speaker.info("公開が無効です。"
-                              "公開メニューの公開設定から有効にしてください。")
+            self.speaker.info(t("msg.publish_disabled"))
             return
         snap = self._build_snapshot()
 
@@ -492,7 +557,7 @@ class MainFrame(wx.Frame):
                 wx.CallAfter(self.speaker.warn, msg, False)
 
         self.publisher.upload_async(snap, done)
-        self.speaker.say("アップロードしています。")
+        self.speaker.say(t("msg.uploading"))
 
     def _maybe_auto_upload(self):
         """公開が有効なら、結果反映のたびにバックグラウンドで自動アップロード。
@@ -504,17 +569,18 @@ class MainFrame(wx.Frame):
         def done(ok: bool, msg: str):
             if not ok:
                 wx.CallAfter(self.speaker.warn,
-                             "自動アップロードに失敗しました。" + msg, False)
+                             t("msg.auto_upload_failed", msg=msg), False)
 
         self.publisher.upload_async(snap, done)
 
 
 def main():
+    set_language(settings.load_language(DATA_DIR))
     app = wx.App()
     frame = MainFrame()
     frame.Show()
-    frame.speaker.info(f"{APP_NAME} バージョン{APP_VERSION}を起動しました。"
-                       "Ctrl+Nで新規作成、F1でキー操作一覧。")
+    frame.speaker.info(t("msg.started", name=t("app.name"),
+                         ver=APP_VERSION))
     app.MainLoop()
 
 

@@ -1,0 +1,331 @@
+FG Tournament Manager v1.1.0 Manual
+========================================
+
+1. Overview
+----------------------------------------
+A tool for running fighting game tournaments, designed to be used
+with a screen reader (PC-Talker / NVDA).
+It supports three formats: single elimination, double elimination
+and round robin league (2 to 64 players; double elimination needs
+3 to 64).
+When you enter a result, it can also update a viewer page that your
+friends can open in a browser on their phones or PCs
+(online publishing, chapter 9).
+The screen and speech can be switched between English and Japanese
+(chapter 5).
+The Japanese manual is Manual (Japanese).txt.
+
+2. Requirements
+----------------------------------------
+- Windows 10 / 11 (64-bit)
+- Screen reader: PC-Talker or NVDA recommended
+  (the app works without one, but nothing is read aloud)
+- No installation and no administrator rights needed
+
+3. Installing and starting
+----------------------------------------
+- Extract the zip to any folder
+- Run FGTournament_v1.1.0.exe in the fg-tournament-1.1.0-test
+  folder
+- Do not put it in Program Files. The app writes its saved data in
+  the same folder, so extract it somewhere writable, such as
+  Documents
+- If Windows shows a protection screen (SmartScreen) the first time,
+  choose "More info" and then "Run anyway"
+- Saved data and settings go in the data folder in the same place.
+  To remove the app, just delete the whole folder
+- When you update from an earlier version, copy the data folder from
+  the old folder to the new one. Your saved tournaments, publish
+  settings and viewer link carry over
+  (if you do not copy it, the app starts fresh)
+
+4. Creating a tournament
+----------------------------------------
+Press Ctrl+N. Three screens open one after another.
+ (1) Tournament settings: tournament name, format, length of
+     regular matches, and separate lengths for the Final (Winners
+     Final), the Losers Final, the Grand Final and the Third Place
+     Match. Also: Grand Final Reset (double elimination) and Third
+     Place Match (single elimination)
+ (2) Register players: enter one name per line (2 to 64 players;
+     3 to 64 for double elimination).
+     Each time you press Enter for a new line, the app reads the
+     name you entered and the count (for example "Tanaka, player 1").
+     Press Tab in the text box to move to the Next button
+ (3) Order: F8 shuffles. Check the order by listening, then choose
+     "Generate in This Order"
+After the bracket is generated, every match is listed in the main
+window. Empty spots left by seeding are handled automatically as
+byes.
+A round robin league with many players has many matches
+(2016 matches for 64 players). The list can take a moment to load.
+
+5. Main window and the four views (switch with F6)
+----------------------------------------
+ (1) Matches by Round: read every match with the Up and Down arrows
+ (2) Player Progress: each player's wins and losses so far, and
+     their next match
+ (3) Next Matches: matches that can be played now, in playing order
+ (4) Standings: while the tournament is running, who is still in and
+     who is out; after it ends, the final standings
+Press F5 at any time to hear the overall status (progress, next
+match, champion).
+
+Switching the language:
+On the Language menu (Alt+L; the menu is called "Language / 言語"),
+choose "English" or "日本語". The menus, the screen and speech
+switch right away. The app remembers your choice and starts in the
+same language next time. The very first time, it starts in Japanese
+if Windows is set to Japanese, and in English otherwise.
+Saved tournaments open in either language. Tournament names and
+player names are shown exactly as you entered them.
+
+6. Entering results
+----------------------------------------
+Select a match in the list and press Enter.
+A list of options opens, such as "Tanaka 2 to 0", "Tanaka 2 to 1",
+"Suzuki 2 to 1" ... "Ito wins by forfeit". Choose one with the Up and
+Down arrows and press Enter.
+After you confirm, the app reads something like:
+"Tanaka wins, 2 to 0. Tanaka advances to Winners Final.
+Ito goes to Losers Semifinal."
+In double elimination, if the losers side player wins the Grand
+Final, a Grand Final Reset is added automatically.
+In a round robin league, when you enter the last match the app
+reads "All matches are finished. (name) is the champion." (or says
+that there is a tie for first place).
+After a third place match, it reads who takes 3rd and 4th place.
+
+7. Editing and undoing
+----------------------------------------
+- Ctrl+Z: undo the last result, or the last edit.
+  The app reads the match that was undone, so you know what changed.
+  Undoing an edit brings back the result from before the edit,
+  together with the results of later matches that the edit cleared
+- Enter on a match that already has a result: edit the result.
+  If the edit changes the winner, you first see the list of later
+  matches whose results will be cleared, and then confirm.
+  Changing only the score does not affect other matches
+
+8. Saving and opening
+----------------------------------------
+- The tournament is saved to the data folder automatically after
+  every result
+  (to autosave.json until you save it under a name, then to that
+  file)
+- When you create a new tournament, the previous autosave.json is
+  kept in the data folder as autosave_backup_(date)_(time).json.
+  You can open a tournament you never saved under a name from
+  there with Ctrl+O
+- Ctrl+S: save / Ctrl+Shift+S: save as
+- Ctrl+O: open a saved tournament (you can continue where you left
+  off)
+
+9. Online publishing (optional)
+----------------------------------------
+This feature updates a viewer page every time you enter a result,
+so your friends can follow the tournament on their own phones or
+PCs.
+- You need the URL of a relay server and an "admin key".
+  Neither is included in the zip. The files for the server are in the
+  web folder of https://github.com/Takahashi618/fg-tournament , and
+  the steps are in "Setting up a server for online publishing" in the
+  English README:
+  https://github.com/Takahashi618/fg-tournament/blob/main/README.en.md
+  If someone else runs a server, you can also get them from that
+  person
+- The relay URL must start with https:// (so the admin key is never
+  sent unencrypted)
+- Setup: Publish menu → Publish Settings → enter the relay URL and
+  the admin key → check "Enable online publishing" →
+  "Issue (Reissue) Viewer Link" → Save
+  (the app remembers the URL and the key after you enter them once)
+- Publish menu → "Copy Viewer Link" puts the link to send to your
+  friends on the clipboard
+- While publishing is on, the app uploads automatically after every
+  result. Nothing is read aloud when an upload succeeds; you only
+  hear a warning when it fails.
+  Press Ctrl+U to upload at any time
+- Only people who know the viewer link can see the page. To change
+  the link, use "Issue (Reissue) Viewer Link" in Publish Settings
+  and then Save. When you save, the app deletes the data of the old
+  link from the server (if you cancel, the link does not change).
+  If the data cannot be deleted, you hear a warning; in that case
+  the old link keeps showing the last data that was sent
+- The viewer page uses the language the app was in when it
+  uploaded. If you switch the language, the page changes at the next
+  upload
+- If your server was set up for an earlier version, replace
+  viewer.html and tournament_relay.php on your server with the ones
+  from this version. With the earlier viewer.html, the buttons and
+  headings stay in Japanese even when you publish in English
+  (viewer.html contains no admin key, so you can simply replace it).
+  The new tournament_relay.php accepts up to 2 MB instead of 512 KB,
+  and it does not send the data again when nothing has changed, so
+  spectators download much less. When you replace it, write in the
+  admin key the same way as the first time
+- Publishing also works with the earlier tournament_relay.php. A
+  finished 64-player round robin league is about 300 KB, but with very
+  long player names (about 20 full-width characters) it can go over the
+  512 KB limit (chapter 12)
+
+10. Using the viewer page (for friends watching)
+----------------------------------------
+- Just open the link you received in a browser. The page refreshes
+  every 15 seconds
+- Use the buttons to switch between "List view" and "Bracket view".
+  The list view reads well with a screen reader
+- When a result comes in, a one-line notice appears, such as
+  "Update: ... wins ..."
+- The standings are a table. While the tournament is running, you
+  can read who is still in and who is out
+- The page is in English or Japanese, following the organizer's app
+
+11. Keyboard shortcuts
+----------------------------------------
+Enter        enter the result of the selected match (edit it if it
+             already has one)
+F5           read the overall status
+F6           switch views (by round → by player → next matches →
+             standings)
+F1           keyboard shortcuts
+Ctrl+Z       undo the last result or edit
+Ctrl+N       create a new tournament
+Ctrl+O       open a tournament file
+Ctrl+S       save
+Ctrl+Shift+S save as
+Ctrl+U       upload now (when publishing is on)
+F8           shuffle (in the Order dialog)
+Esc          close a dialog (cancel)
+Alt+L        Language menu (switch between English and 日本語)
+
+12. Questions and troubleshooting
+----------------------------------------
+Q. Nothing is read aloud
+A. Check that PC-Talker or NVDA is running.
+
+Q. The app says "The admin key is not set" or "The relay URL is not
+   set"
+A. Follow the setup steps in chapter 9.
+
+Q. I heard a warning that an upload failed
+A. Check your internet connection and press Ctrl+U to send it again.
+   The viewer page keeps showing the last data that was uploaded.
+
+Q. The app says "The server rejected the data as too large"
+A. If tournament_relay.php on your server is from an earlier version
+   (limit 512 KB), replace it with the one from this version (limit
+   2 MB), in the web folder on GitHub (chapter 9). Write in the admin
+   key the same way as the first time. If it still happens with the new
+   tournament_relay.php, check your web server's own upload size limit
+   (for example nginx's client_max_body_size).
+
+Q. In a round robin, a player who lost once is read as "Eliminated"
+A. This was a bug in earlier versions. This version never reads round
+   robin players as eliminated.
+
+Q. I cannot enter "3 to 0" in a best of 3 match
+A. A best of 3 is first to 2 wins, so the score is "2 to x". The list
+   only offers scores that fit the length of that match.
+
+Q. I entered a wrong result
+A. Right away, press Ctrl+Z. If you notice later, select that match
+   and press Enter to edit it (chapter 7).
+
+Q. The number of matches seems large for the number of players
+A. The overall status (F5) and the viewer page count only matches
+   that are actually played (byes from seeding are not counted).
+   In double elimination, the Grand Final Reset is added to the count
+   once it is certain to be played.
+
+Q. The app is in Japanese / I want to use it in English
+A. Open the Language menu with Alt+L and choose "English"
+   (or "日本語" for Japanese).
+
+13. Distribution
+----------------------------------------
+This is a test version. It is distributed under the MIT License
+(Copyright (c) 2026 Takahashi; full text in LICENSE.txt).
+The licenses of the bundled components are in
+THIRD-PARTY-NOTICES.txt.
+This software was made with AI (Claude by Anthropic), under the
+author's direction and judgment. Most of the program code and the
+documents were written by the AI.
+If you find a problem or have an idea for an improvement, please let
+the author know, together with what was read aloud and the steps you
+took.
+
+14. Version history
+----------------------------------------
+v1.1.0 (2026-11-11)
+- English for the screen and speech. Switch between English and
+  Japanese on the Language menu (the choice is kept for the next
+  start)
+- Added this English manual (Manual (English).txt)
+- The viewer page also shows English or Japanese, following the app
+- The maximum number of players is now 64 instead of 16
+  (3 to 64 for double elimination)
+- The relay server now accepts up to 2 MB instead of 512 KB. It does
+  not send the data to the viewer page again when nothing has
+  changed, so spectators download much less (when viewer.html and
+  tournament_relay.php on your server are from this version; chapter 9)
+- The data sent to the viewer page is smaller (about 300 KB even for
+  a 64-player round robin league). Uploads of large tournaments are no
+  longer cut off on slow connections. When you enter results quickly,
+  an older upload can no longer arrive late and overwrite a newer one
+- Player registration now tells you right away when double
+  elimination has only 2 players
+- Fixed: in a round robin, a player who lost once was read as
+  eliminated
+- In a round robin, the end of the league and the champion (or a tie
+  for first place) are now announced even when the last match does not
+  involve the champion
+- Fixed: after the tournament ended, editing an earlier match read its
+  loser as the runner-up
+- Fixed: player names containing "&" were shown incorrectly in the
+  result dialog
+- Pressing F5 before creating or opening a tournament now tells you how
+  to create or open one
+
+v1.0.4 (2026-11-11)
+- Ctrl+Z can now undo the last edit too (the result from before the
+  edit comes back)
+- Creating a new tournament keeps the previous tournament's autosave
+  under a different name
+- The places are read after a third place match
+- Reissuing the viewer link takes effect when you save, and the data
+  of the old link is deleted from the server (tournament_relay.php on
+  your server must be updated)
+- The relay URL must start with https://
+- Opening a damaged tournament file now gives a clear message
+- Tournament files edited in v1.0.4 or later cannot be opened in
+  v1.0.3 or earlier
+
+v1.0.3 (2026-11-04)
+- Added the MIT License and the list of licenses of the bundled
+  components
+- File and folder names in the download are now in English letters
+  (the manual is Manual (Japanese).txt)
+- The relay URL no longer has a default; enter it in Publish
+  Settings (if you copy the data folder from an earlier version, the
+  URL carries over)
+
+v1.0.2 (2026-07-16)
+- Fixed the player name not being heard during registration because
+  the screen reader's key echo ("new line") talked over it
+- Added steps for carrying data over from an earlier version to the
+  manual (chapter 3)
+
+v1.0.1 (2026-07-16) Changes from tester feedback
+- Player registration: the name and the count are read each time you
+  press Enter for a new line
+- Separate lengths can be set for the Final (Winners Final), the
+  Losers Final, the Grand Final and the Third Place Match
+- The match count now shows only matches that are actually played,
+  without byes (the Grand Final Reset is added when it happens)
+
+v1.0.0 (2026-07-16) First release
+- Running tournaments in three formats; entering, editing and undoing
+  results
+- Four views, speech tuned for PC-Talker / NVDA
+- Saving and autosave, online publishing and the viewer page

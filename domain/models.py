@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+from i18n import t
+
 
 class Format(Enum):
     SINGLE_ELIM = "single_elim"
@@ -36,6 +38,15 @@ class SourceType(Enum):
 
 
 BYE_ID = "__BYE__"
+
+# 参加人数の範囲。ダブルエリミネーションだけ下限が3人。
+MIN_PLAYERS = 2
+MIN_PLAYERS_DOUBLE = 3
+MAX_PLAYERS = 64
+
+
+def min_players(fmt: "Format") -> int:
+    return MIN_PLAYERS_DOUBLE if fmt == Format.DOUBLE_ELIM else MIN_PLAYERS
 
 
 @dataclass
@@ -106,7 +117,7 @@ class Match:
 
 @dataclass
 class Config:
-    title: str = "大会"
+    title: str = ""  # 空のときの表示は textgen が現在の言語の既定名にする
     format: Format = Format.DOUBLE_ELIM
     best_of_default: int = 3
     best_of_finals: int = 5     # 決勝系の既定(個別指定が無いときのフォールバック)
@@ -138,6 +149,8 @@ class TournamentState:
     matches: dict[str, Match] = field(default_factory=dict)
     match_order: list[str] = field(default_factory=list)
     generated: bool = False
+    # (phase, round_no) -> 試合数。engine が生成時に数える(構造は生成後に変わらない)
+    round_sizes: dict = field(default_factory=dict, repr=False, compare=False)
 
     def player(self, player_id: str) -> Optional[Player]:
         for p in self.players:
@@ -147,9 +160,9 @@ class TournamentState:
 
     def name_of(self, player_id: Optional[str]) -> str:
         if player_id is None:
-            return "未定"
+            return t("name.tbd")
         if player_id == BYE_ID:
-            return "不戦"
+            return t("name.bye")
         p = self.player(player_id)
         return p.name if p else player_id
 

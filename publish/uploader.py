@@ -5,11 +5,15 @@
   keyring が使えない環境では publish_state.json に平文で保存(フォールバック)
 - アップロードは urllib(標準ライブラリ)のHTTPS POST。
   X-Admin-Key ヘッダで認証(URLに載せずアクセスログへの漏えいを避ける)
+- 本文は空白を省いたJSON(64人の総当たりリーグでも relay の上限 2MB に収める)
+- 送信は1本ずつ。送信中に次の結果が入ったら、最新の1件だけを続けて送る
+  (並行して送ると、古い内容が後から届いて新しい内容を上書きすることがある)
 - relay のURLは https:// だけを受け付ける(管理キーを暗号化せずに流さないため)。
   手元での確認用に、このPC自身(localhost / 127.0.0.1)だけは http:// も通す
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import secrets
@@ -20,12 +24,11 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
+from i18n import t
+
 DEFAULT_RELAY_URL = ""
 KEYRING_SERVICE = "fg_tournament_relay"
 KEYRING_USER = "admin_key"
-URL_SCHEME_MESSAGE = "relayのURLは https:// で始まるものにしてください"
-
-_DoneCallback = Callable[[bool, str], None]
 
 
 def is_safe_relay_url(url: str) -> bool:
@@ -54,6 +57,10 @@ def new_token() -> str:
 
 
 class Publisher:
+    # 送受信が止まったままの時間の上限(秒)。本文は小分けに送るので、
+    # 大きな大会を遅い回線で送っても、進んでいる限りは打ち切らない
+    timeout = 10
+
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
         self.state_path = self.data_dir / "publish_state.json"
@@ -61,10 +68,10 @@ class Publisher:
         self.token = ""
         self.relay_url = DEFAULT_RELAY_URL
         self._fallback_key: Optional[str] = None
-        # 送信は1本のワーカーが順に行う。待ちは最新の1件だけを持つ
         self._lock = threading.Lock()
-        self._pending: Optional[tuple[dict, list[_DoneCallback]]] = None
-        self._worker_running = False
+        self._pending: Optional[dict] = None
+        self._pending_callbacks: list[Callable[[bool, str], None]] = []
+        self._uploading = False
         self._load()
 
     # ---------- 状態 ----------
@@ -131,35 +138,36 @@ class Publisher:
     # ---------- アップロード ----------
 
     def upload_async(self, snapshot: dict,
-                     on_done: Optional[_DoneCallback] = None) -> None:
-        """別スレッドでPOSTする。on_done はワーカースレッドから呼ばれるため、
-        UI操作する場合は呼び出し側で wx.CallAfter を使うこと。
-
-        送信は必ず1件ずつ、頼んだ順に行う。送信中に次が来たら、待ちを新しい内容で
-        置き換える(古い内容が後から届いて、閲覧ページが前の状態へ戻るのを防ぐ)。
-        置き換えられた分の on_done は、新しい内容の結果で呼ぶ。"""
+                     on_done: Optional[Callable[[bool, str], None]] = None
+                     ) -> None:
+        """別スレッドでPOSTする。送信中なら、送り終わってから最新の1件だけを送る
+        (間の古い内容は送らない)。on_done は、その内容を含む送信の結果で呼ぶ。
+        on_done はワーカースレッドから呼ばれるため、UI操作する場合は
+        呼び出し側で wx.CallAfter を使うこと。"""
         with self._lock:
-            callbacks = list(self._pending[1]) if self._pending else []
+            self._pending = snapshot
             if on_done is not None:
-                callbacks.append(on_done)
-            self._pending = (snapshot, callbacks)
-            if self._worker_running:
+                self._pending_callbacks.append(on_done)
+            if self._uploading:
                 return
-            self._worker_running = True
+            self._uploading = True
         threading.Thread(target=self._worker, daemon=True).start()
 
     def _worker(self) -> None:
         while True:
             with self._lock:
-                if self._pending is None:
-                    self._worker_running = False
-                    return
-                snapshot, callbacks = self._pending
+                snapshot = self._pending
+                callbacks = self._pending_callbacks
                 self._pending = None
+                self._pending_callbacks = []
+                if snapshot is None:
+                    self._uploading = False
+                    return
             try:
                 ok, msg = self.upload_now(snapshot)
-            except Exception as exc:
-                ok, msg = False, f"送信エラー: {exc.__class__.__name__}"
+            except Exception as exc:  # 送信の不具合でワーカーを止めない
+                ok, msg = False, t("up.network_error",
+                                   name=exc.__class__.__name__)
             for cb in callbacks:
                 try:
                     cb(ok, msg)
@@ -168,47 +176,58 @@ class Publisher:
 
     def _post(self, relay_url: str, action: str, token: str, body: bytes,
               admin_key: Optional[str]) -> tuple[bool, str]:
+        """relay へ POST する。(成功したか, 失敗のときの文)。"""
         if not relay_url:
-            return False, "relayのURLが未設定です"
+            return False, t("up.no_relay")
         if not is_safe_relay_url(relay_url):
-            return False, URL_SCHEME_MESSAGE
+            return False, t("up.need_https")
         if not token:
-            return False, "閲覧URLが未発行です"
+            return False, t("up.no_token")
         key = admin_key if admin_key is not None else self.get_admin_key()
         if not key:
-            return False, "管理キーが未設定です"
+            return False, t("up.no_key")
         url = f"{relay_url}?action={action}&token={token}"
+        # 本文をファイルのように渡すと、http.client が小分けにして送る。
+        # bytes のまま渡すと1回の送信になり、timeout が送信全体の締め切りになる
+        # (0.7MB を10秒で送れない回線では、毎回失敗する)
         req = urllib.request.Request(
-            url, data=body, method="POST",
+            url, data=io.BytesIO(body), method="POST",
             headers={"Content-Type": "application/json; charset=utf-8",
+                     "Content-Length": str(len(body)),
                      "X-Admin-Key": key})
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 if isinstance(data, dict) and data.get("ok"):
                     return True, ""
                 err = data.get("error", "") if isinstance(data, dict) else ""
-                return False, f"サーバー応答エラー: {err}"
+                return False, t("up.server_error", error=err)
         except urllib.error.HTTPError as exc:
-            return False, f"HTTPエラー {exc.code}"
+            if exc.code == 413:
+                # 以前の relay(上限512KB)か、Webサーバー自体の上限
+                return False, t("up.too_large")
+            return False, t("up.http_error", code=exc.code)
         except Exception as exc:
-            return False, f"通信エラー: {exc.__class__.__name__}"
+            return False, t("up.network_error",
+                            name=exc.__class__.__name__)
 
     def upload_now(self, snapshot: dict,
                    admin_key: Optional[str] = None) -> tuple[bool, str]:
-        body = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(snapshot, ensure_ascii=False,
+                          separators=(",", ":")).encode("utf-8")
         ok, msg = self._post(self.relay_url, "put", self.token, body, admin_key)
-        return ok, ("アップロードしました" if ok else msg)
+        return ok, (t("up.ok") if ok else msg)
 
     def delete_remote(self, token: str, relay_url: Optional[str] = None,
                       admin_key: Optional[str] = None) -> tuple[bool, str]:
         """サーバーに残っている閲覧データを消す(閲覧URLを作り直したとき用)。"""
         ok, msg = self._post(relay_url or self.relay_url, "delete", token,
                              b"{}", admin_key)
-        return ok, ("削除しました" if ok else msg)
+        return ok, (t("up.deleted") if ok else msg)
 
     def delete_remote_async(self, token: str, relay_url: Optional[str] = None,
-                            on_done: Optional[_DoneCallback] = None) -> None:
+                            on_done: Optional[Callable[[bool, str], None]] = None
+                            ) -> None:
         def run() -> None:
             ok, msg = self.delete_remote(token, relay_url)
             if on_done is not None:

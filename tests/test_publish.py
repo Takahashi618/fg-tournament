@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -20,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import i18n
 from domain import Config, Format, TournamentEngine
 from publish import exporter
 from publish.uploader import Publisher, is_safe_relay_url, viewer_url_for
@@ -62,19 +64,18 @@ check(isinstance(snap["standings_lines"], list)
       and len(snap["standings_lines"]) >= 1, "順位行あり")
 check(snap["league_table"] is None, "エリミ形式ではリーグ表なし")
 check(snap["elimination_groups"] is not None, "進行中の敗退グループあり")
+check(snap["lang"] == "ja", "言語コード ja")
 
-m0 = snap["matches"][0]
-for key in ("id", "phase", "round", "index", "group", "label", "line",
-            "p1", "p2", "state", "winner", "winner_slot", "s1", "s2",
-            "forfeit", "auto"):
-    if key not in m0:
-        check(False, f"matchキー欠落: {key}")
-        break
-else:
-    check(True, "matchの全キーが存在")
+# 閲覧ページが読む項目だけを送る(版2)
+BRACKET_KEYS = {"group", "line", "state", "phase", "round", "p1", "p2",
+                "winner_slot", "s1", "s2", "forfeit", "auto"}
+check(snap["snapshot_version"] == 2, "スナップショットの版は2")
+check(all(set(m) == BRACKET_KEYS for m in snap["matches"]),
+      f"エリミ形式の試合の項目 {sorted(set(snap['matches'][0]))}")
 
-done_m = [m for m in snap["matches"] if m["id"] == "W1-1"][0]
-check(done_m["winner"] == "田中" and done_m["s1"] == 2 and done_m["s2"] == 0,
+done_m = snap["matches"][0]
+check(done_m["p1"] == "田中" and done_m["winner_slot"] == 1
+      and done_m["s1"] == 2 and done_m["s2"] == 0,
       "W1-1の勝者とスコア")
 try:
     json.dumps(snap, ensure_ascii=False)
@@ -98,13 +99,38 @@ check(snap2["finished"] is True, "リーグ終了")
 check(snap2["league_table"] is not None
       and len(snap2["league_table"]) == 3, "リーグ表3行")
 check(snap2["placements"] is not None, "確定順位あり")
+check(all(set(m) == {"group", "line", "state"} for m in snap2["matches"]),
+      "総当たりの試合は一覧に要る項目だけ")
+check([r["place_label"] for r in snap2["league_table"]] == ["1位", "2位", "3位"]
+      and snap2["placements"][0]["place_label"] == "1位",
+      "順位の表記(place_label)")
+
+# 英語で作ったスナップショット
+i18n.set_language("en")
+try:
+    snap_en = exporter.build_snapshot(eng)
+finally:
+    i18n.set_language("ja")
+check(snap_en["lang"] == "en", "英語: 言語コード en")
+check(snap_en["format_name"] == "Double Elimination", "英語: 形式名")
+check(snap_en["matches"][0]["line"].startswith("Winners Semifinal, Match 1"),
+      f"英語: 試合の行({snap_en['matches'][0]['line']})")
+check(snap_en["summary"].startswith("公開テスト杯, Double Elimination"),
+      "英語: 全体状況(大会名は入力のまま)")
+i18n.set_language("en")
+try:
+    snap2_en = exporter.build_snapshot(eng2)
+finally:
+    i18n.set_language("ja")
+check([r["place_label"] for r in snap2_en["league_table"]]
+      == ["1st", "2nd", "3rd"], "英語: 順位の表記(place_label)")
 
 # ---------- uploader (ローカルHTTPスタブ) ----------
 note("=== uploader ===")
 
 STORE: dict[str, bytes] = {}
-ARRIVED: list = []
-SLOW = threading.Event()
+POSTS: list[str] = []          # 受け取った本文の title(届いた順)
+DELAY_FIRST = threading.Event()  # セットすると、次の1件の保存を遅らせる
 
 
 class StubHandler(BaseHTTPRequestHandler):
@@ -122,17 +148,20 @@ class StubHandler(BaseHTTPRequestHandler):
         key = self.headers.get("X-Admin-Key", "")
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
-        action = q.get("action", [""])[0]
+        if key == "toolarge":
+            self._send(413, {"ok": False, "error": "too large"})
+            return
         if key != "testkey":
             self._send(403, {"ok": False, "error": "auth failed"})
             return
-        if action == "delete":
+        if q.get("action", [""])[0] == "delete":
             STORE.pop(token, None)
             self._send(200, {"ok": True})
             return
-        if SLOW.is_set():
-            time.sleep(0.3)  # 送信中に次の依頼が重なる状況を作る
-        ARRIVED.append(json.loads(body.decode("utf-8")).get("seq"))
+        if DELAY_FIRST.is_set():
+            DELAY_FIRST.clear()
+            time.sleep(0.8)
+        POSTS.append(json.loads(body.decode("utf-8")).get("title", ""))
         STORE[token] = body
         self._send(200, {"ok": True})
 
@@ -160,37 +189,59 @@ check(ok, f"アップロード成功: {msg}")
 stored = json.loads(STORE[tok].decode("utf-8"))
 check(stored["title"] == "公開テスト杯", "サーバー側に本文が保存された")
 
+check(STORE[tok] == json.dumps(snap, ensure_ascii=False,
+                              separators=(",", ":")).encode("utf-8"),
+      "本文は空白を省いたJSON")
+
 ok2, msg2 = pub.upload_now(snap, admin_key="wrongkey")
 check(not ok2 and "403" in msg2, f"認証失敗を検出: {msg2}")
 
+ok4, msg4 = pub.upload_now(snap, admin_key="toolarge")
+check(not ok4 and "413" in msg4 and "tournament_relay.php" in msg4,
+      f"大きすぎるときは relay の置き直しを案内: {msg4}")
+i18n.set_language("en")
+try:
+    ok5, msg5 = pub.upload_now(snap, admin_key="wrongkey")
+finally:
+    i18n.set_language("ja")
+check(not ok5 and msg5 == "HTTP error 403", f"英語: 通信の結果({msg5})")
+
 pub2 = Publisher(tmp_dir)
 check(pub2.token == tok, "publish_state.json から状態を復元")
+
+# 続けて送ると1本ずつ送り、送信中に来た分は最新の1件だけを送る
+# (古い内容が後から届いて新しい内容を上書きしない)
+pub_async = Publisher(tmp_dir)
+pub_async.relay_url = pub.relay_url
+pub_async.token = tok
+pub_async.get_admin_key = lambda: "testkey"
+results: list[tuple[bool, str]] = []
+all_done = threading.Event()
+
+
+def on_done(ok, msg):
+    results.append((ok, msg))
+    if len(results) == 3:
+        all_done.set()
+
+
+POSTS.clear()
+DELAY_FIRST.set()
+for title in ("1件目", "2件目", "3件目"):
+    s_async = dict(snap)
+    s_async["title"] = title
+    pub_async.upload_async(s_async, on_done)
+    time.sleep(0.1)
+all_done.wait(10)
+check(len(results) == 3 and all(ok for ok, _ in results),
+      f"続けた送信: 3件とも結果を知らせる {results}")
+check(POSTS == ["1件目", "3件目"],
+      f"続けた送信: 送信中に来た分は最新だけ送る {POSTS}")
+check(json.loads(STORE[tok].decode("utf-8"))["title"] == "3件目",
+      "続けた送信: サーバーに残るのは最新の内容")
+
 check(not (tmp_dir / "publish_state.json.tmp").exists(),
       "公開状態の保存: 一時ファイルが残らない")
-
-# 続けて頼んでも、古い内容が後から届いて上書きしない
-pub.get_admin_key = lambda: "testkey"  # keyring を使わずに送る
-ARRIVED.clear()
-SLOW.set()
-results: list = []
-finished = threading.Event()
-
-
-def on_done(ok: bool, _msg: str) -> None:
-    results.append(ok)
-    if len(results) == 5:
-        finished.set()
-
-
-for seq in range(1, 6):
-    pub.upload_async(dict(snap, seq=seq), on_done)
-finished.wait(10)
-SLOW.clear()
-check(len(results) == 5 and all(results), f"連続送信: 5件とも結果が返る({results})")
-check(ARRIVED == sorted(ARRIVED), f"連続送信: 届いた順が頼んだ順({ARRIVED})")
-check(json.loads(STORE[tok].decode("utf-8")).get("seq") == 5,
-      "連続送信: サーバーに残るのは最後の内容")
-check(len(ARRIVED) < 5, f"連続送信: 待ちの間の古い内容は送らない({len(ARRIVED)}回送信)")
 
 # 閲覧URLを作り直したときの、古い内容の削除
 okd, msgd = pub.delete_remote(tok, admin_key="testkey")
@@ -209,11 +260,70 @@ for url, expected in (("https://example.com/r.php", True),
                       ("example.com/r.php", False),
                       ("", False)):
     check(is_safe_relay_url(url) is expected, f"relay のURLの検査: {url!r} → {expected}")
-pub.relay_url = "http://example.com/tournament_relay.php"
-ok4, msg4 = pub.upload_now(snap, admin_key="testkey")
-check(not ok4 and "https" in msg4, f"http の relay へは送らない: {msg4}")
+pub_http = Publisher(Path(tempfile.mkdtemp()))
+pub_http.relay_url = "http://example.com/tournament_relay.php"
+pub_http.token = "cd" * 16
+ok6, msg6 = pub_http.upload_now(snap, admin_key="testkey")
+check(not ok6 and "https" in msg6, f"http の relay へは送らない: {msg6}")
 check(viewer_url_for("https://example.com/x/relay.php", "abc")
       == "https://example.com/x/viewer.html?t=abc", "閲覧URLの組み立て")
+
+# 大きな本文を遅い回線で送っても、送れている限り打ち切らない
+# (本文を小分けに送る。まとめて送ると timeout が送信全体の締め切りになる)
+
+
+class SlowReader(BaseHTTPRequestHandler):
+    def setup(self):
+        self.request.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        super().setup()
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        got = 0
+        while got < n:
+            chunk = self.rfile.read(min(8192, n - got))
+            got += len(chunk)
+            time.sleep(len(chunk) / (100 * 1024))  # 毎秒100KBで読む
+        body = b'{"ok":true}'
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+import http.client
+_orig_connect = http.client.HTTPConnection.connect
+
+
+def _small_buffer_connect(self):
+    # 送信側のバッファも小さくして、遅い回線と同じように送信が待たされる状態にする
+    _orig_connect(self)
+    self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+
+
+slow = ThreadingHTTPServer(("127.0.0.1", 0), SlowReader)
+threading.Thread(target=slow.serve_forever, daemon=True).start()
+http.client.HTTPConnection.connect = _small_buffer_connect
+try:
+    pub_slow = Publisher(Path(tempfile.mkdtemp()))
+    pub_slow.relay_url = (f"http://127.0.0.1:{slow.server_address[1]}"
+                          "/tournament_relay.php")
+    pub_slow.token = "ab" * 16
+    # 1秒だと、PC が混んでいるときに1回の送信が待たされて落ちることがあった。
+    # 全体(約4秒)より短ければ確かめたいことは同じなので、3秒にしている
+    pub_slow.timeout = 3
+    big = {"pad": "x" * (400 * 1024)}
+    t0 = time.time()
+    ok_slow, msg_slow = pub_slow.upload_now(big, admin_key="k")
+    took = time.time() - t0
+finally:
+    http.client.HTTPConnection.connect = _orig_connect
+    slow.shutdown()
+check(ok_slow and took > 3.3,
+      f"遅い回線: timeout(3秒)より長くかかっても送れる({msg_slow}, {took:.1f}秒)")
 
 # relay のURLは既定で空(特定のサーバーへ送らない)
 empty_dir = Path(tempfile.mkdtemp())
@@ -229,15 +339,26 @@ shutil.rmtree(empty_dir, ignore_errors=True)
 note("=== web ファイル ===")
 viewer = (ROOT / "web" / "viewer.html").read_text(encoding="utf-8")
 for marker in ('lang="ja"', 'aria-live="polite"', 'scope', "action=get",
-               "setInterval", "no-store"):
+               "setInterval", 'cache: "no-cache"', "lastText", "place_label",
+               "data-i18n", "STRINGS", "Tournament Viewer",
+               # 画面の言語はデータの lang に合わせる(無ければ以前の版の日本語)
+               'const dataLang = data.lang || "ja";',
+               "if (dataLang !== lang) applyLanguage(dataLang);"):
     check(marker in viewer, f"viewer.html に {marker}")
 relay = (ROOT / "web" / "tournament_relay.php").read_text(encoding="utf-8")
 for marker in ("hash_equals", "preg_match", "LOCK_EX", "X_ADMIN_KEY",
-               "MAX_BYTES", "'delete'", "require_admin"):
+               "MAX_BYTES", "2097152", "ETag", "HTTP_IF_NONE_MATCH",
+               "http_response_code(304)", "gzencode", "'delete'",
+               "require_admin"):
+    check(marker in relay, f"relay.php に {marker}")
+for marker in ("$_GET['have']", "'unchanged' => true"):
     check(marker in relay, f"relay.php に {marker}")
 check("diag" not in relay, "relay.php に認証なしの診断用の入口が無い")
 check(relay.count("require_admin();") == 2,
       "relay.php の put と delete が管理キーを確かめる")
+for marker in ("notFoundFirst", "notFoundLater", "res.status === 404",
+               "&have=", "data.unchanged !== true"):
+    check(marker in viewer, f"viewer.html に {marker}")
 
 # ---------- 結果出力 ----------
 out = Path(__file__).parent / "result_publish.txt"

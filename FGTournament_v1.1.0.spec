@@ -30,7 +30,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='FGTournament_v1.0.4',
+    name='FGTournament_v1.1.0',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -49,5 +49,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='FGTournament_v1.0.4',
+    name='FGTournament_v1.1.0',
 )

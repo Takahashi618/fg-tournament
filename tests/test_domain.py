@@ -6,16 +6,20 @@
 from __future__ import annotations
 
 import json
+import random
+import string
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from domain.models import (BYE_ID, Config, Format, MatchState, Phase,
-                           SourceType)
+from domain.models import (BYE_ID, MAX_PLAYERS, Config, Format, MatchState,
+                           Phase, SourceType)
+from domain.bracket_double import lb_template
 from domain.bracket_single import bracket_size, seed_slots
 from domain.engine import EngineError, TournamentEngine
 from domain import standings, textgen
+import i18n
 
 LINES: list[str] = []
 TOTAL = 0
@@ -36,9 +40,10 @@ def note(text: str) -> None:
     LINES.append(text)
 
 
-def new_engine(fmt: Format, names: list[str], **cfg) -> TournamentEngine:
+def new_engine(fmt: Format, names: list[str], title: str = "テスト大会",
+               **cfg) -> TournamentEngine:
     e = TournamentEngine()
-    e.setup(Config(title="テスト大会", format=fmt, **cfg))
+    e.setup(Config(title=title, format=fmt, **cfg))
     e.register_players(names)
     e.generate()
     return e
@@ -61,7 +66,7 @@ def play_all(e: TournamentEngine, chooser=None) -> None:
         else:
             e.report(m.match_id, 2, 0, needed)
         guard += 1
-        if guard > 500:
+        if guard > 5000:
             raise RuntimeError("play_all が収束しません")
 
 
@@ -104,7 +109,7 @@ check(bracket_size(3) == 4 and bracket_size(8) == 8 and bracket_size(9) == 16,
 
 # ---------- B. シングルエリミネーション ----------
 note("=== B. シングルエリミネーション ===")
-for n in range(2, 17):
+for n in range(2, MAX_PLAYERS + 1):
     e = new_engine(Format.SINGLE_ELIM, names_n(n))
     size = bracket_size(n)
     check(len(e.state.matches) == size - 1, f"単{n}人: 試合数 {size - 1}")
@@ -127,7 +132,7 @@ check(top4 == [1, 2, 3, 4], "単8人+3P: 1〜4位が一意に確定")
 
 # ---------- C. ダブルエリミネーション ----------
 note("=== C. ダブルエリミネーション ===")
-for n in range(3, 17):
+for n in range(3, MAX_PLAYERS + 1):
     e = new_engine(Format.DOUBLE_ELIM, names_n(n))
     size = bracket_size(n)
     expected = 2 * size - 2 + 1  # +1 はリセット戦
@@ -176,7 +181,7 @@ check(pl_map.get(gf.slot2.resolved_id) == 2, "双8リセット: 2位はGF敗者�
 
 # ---------- D. ルーザーズ合流の即再戦回避(構造検証) ----------
 note("=== D. L2の即再戦回避 ===")
-for n in (8, 16):
+for n in (8, 16, 32, 64):
     e = new_engine(Format.DOUBLE_ELIM, names_n(n))
     st = e.state
     ok = True
@@ -410,8 +415,489 @@ play_all(e, chooser=lambda m: 2 if m.match_id == "GF" else 1)
 t1, d1 = standings.real_match_counts(e.state)
 check(t1 == 7 and d1 == 7, f"双4人: リセット戦発生で7対7({t1}対{d1})")
 
-# ---------- J. 修正の取り消し ----------
-note("=== J. 修正の取り消し ===")
+# ---------- J. 参加人数の上限(64人) ----------
+note("=== J. 参加人数の上限(64人) ===")
+check(MAX_PLAYERS == 64, "上限は64人")
+for fmt in Format:
+    e = TournamentEngine()
+    e.setup(Config(title="上限", format=fmt))
+    e.register_players(names_n(64))
+    check(len(e.state.players) == 64, f"{fmt.value}: 64人を登録できる")
+    e = TournamentEngine()
+    e.setup(Config(title="上限", format=fmt))
+    err = False
+    try:
+        e.register_players(names_n(65))
+    except EngineError as exc:
+        err = "64" in str(exc)
+    check(err, f"{fmt.value}: 65人は拒否(上限64を伝える)")
+
+e = TournamentEngine()
+e.setup(Config(title="下限", format=Format.DOUBLE_ELIM))
+err = False
+try:
+    e.register_players(names_n(2))
+except EngineError as exc:
+    err = "3" in str(exc)
+check(err, "双: 2人は登録の時点で拒否(下限3を伝える)")
+
+# 以前の固定テンプレート(4/8/16人)と同じ配置になる = 保存した大会が同じブラケットで再現される
+OLD_LB_TEMPLATES = {
+    4: [
+        [(("L", "W1-1"), ("L", "W1-2"))],
+        [(("V", "L1-1"), ("L", "W2-1"))],
+    ],
+    8: [
+        [(("L", "W1-1"), ("L", "W1-2")), (("L", "W1-3"), ("L", "W1-4"))],
+        [(("V", "L1-1"), ("L", "W2-2")), (("V", "L1-2"), ("L", "W2-1"))],
+        [(("V", "L2-1"), ("V", "L2-2"))],
+        [(("V", "L3-1"), ("L", "W3-1"))],
+    ],
+    16: [
+        [(("L", "W1-1"), ("L", "W1-2")), (("L", "W1-3"), ("L", "W1-4")),
+         (("L", "W1-5"), ("L", "W1-6")), (("L", "W1-7"), ("L", "W1-8"))],
+        [(("V", "L1-1"), ("L", "W2-4")), (("V", "L1-2"), ("L", "W2-3")),
+         (("V", "L1-3"), ("L", "W2-2")), (("V", "L1-4"), ("L", "W2-1"))],
+        [(("V", "L2-1"), ("V", "L2-2")), (("V", "L2-3"), ("V", "L2-4"))],
+        [(("V", "L3-1"), ("L", "W3-2")), (("V", "L3-2"), ("L", "W3-1"))],
+        [(("V", "L4-1"), ("V", "L4-2"))],
+        [(("V", "L5-1"), ("L", "W4-1"))],
+    ],
+}
+for size, tpl in OLD_LB_TEMPLATES.items():
+    check(lb_template(size) == tpl, f"ルーザーズ配置: {size}人枠は以前と同じ")
+
+# 32・64人枠の配置も固定する(変えると、保存した32・64人の大会が別の組み合わせで再生される)
+PINNED_DROPS = {
+    32: [[8, 7, 6, 5, 4, 3, 2, 1], [2, 1, 4, 3], [2, 1], [1]],
+    64: [[16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+         [5, 6, 7, 8, 1, 2, 3, 4], [2, 1, 4, 3], [2, 1], [1]],
+}
+for size, pinned in PINNED_DROPS.items():
+    tpl = lb_template(size)
+    majors = [[int(b[1].split("-")[1]) for _a, b in pairs]
+              for r, pairs in enumerate(tpl, start=1) if r % 2 == 0]
+    minors_ok = all(
+        pairs == [(("V", f"L{r - 1}-{2 * i - 1}"), ("V", f"L{r - 1}-{2 * i}"))
+                  for i in range(1, len(pairs) + 1)]
+        for r, pairs in enumerate(tpl, start=1) if r % 2 == 1 and r > 1)
+    check(majors == pinned and minors_ok,
+          f"ルーザーズ配置: {size}人枠の合流順が固定のとおり")
+
+for size in (32, 64):
+    tpl = lb_template(size)
+    k = size.bit_length() - 1
+    check(len(tpl) == 2 * (k - 1), f"ルーザーズ配置: {size}人枠は{2 * (k - 1)}回")
+    drops: list[str] = []
+    for pairs in tpl:
+        for a, b in pairs:
+            drops += [x[1] for x in (a, b) if x[0] == "L"]
+    w_ids = {f"W{r}-{i}" for r in range(1, k + 1)
+             for i in range(1, size // (2 ** r) + 1)}
+    check(sorted(drops) == sorted(w_ids),
+          f"ルーザーズ配置: {size}人枠でウィナーズ全試合の敗者が1回ずつ合流")
+
+# 64人のダブルエリミ: リセット戦あり / 不戦が多い33人
+for n, chooser, label in ((64, lambda m: 2 if m.match_id == "GF" else 1,
+                           "リセット戦"),
+                          (33, None, "不戦が多い")):
+    e = new_engine(Format.DOUBLE_ELIM, names_n(n))
+    play_all(e, chooser)
+    check(e.is_finished() and e.champion_id() == "p1",
+          f"双{n}人({label}): 終了して優勝はシード1")
+    places = [p for p, _ in standings.final_placements(e.state)]
+    check(len(places) == n and places.count(1) == 1,
+          f"双{n}人({label}): 順位が全員分")
+
+# 64人の総当たり: 2016試合・63節、全員63試合
+e = new_engine(Format.ROUND_ROBIN, names_n(64))
+check(len(e.state.matches) == 2016, "リーグ64人: 2016試合")
+check({m.round_no for m in e.state.matches.values()} == set(range(1, 64)),
+      "リーグ64人: 63節")
+pairs = {frozenset(m.players()) for m in e.state.matches.values()}
+check(len(pairs) == 2016, "リーグ64人: 全組み合わせが1回ずつ")
+play_all(e)
+table = standings.league_table(e.state)
+check(e.is_finished() and table[0]["player_id"] == "p1"
+      and table[0]["wins"] == 63, "リーグ64人: 全消化、首位はシード1で63勝")
+check(textgen.match_label(e.state, e.state.matches["RR63-32"])
+      == "第63節 第32試合", "リーグ64人: 試合ラベル")
+
+# 結果の反映(行き先だけをたどる)が、全試合を走査する方法と同じ状態になる。
+# 比べる相手は、同じ操作ログを「報告のたびに全試合を走査する」方法で再生したもの
+# (反映済みの状態に全走査をかけ直すだけでは、まちがって書き込まれた値に気づけない)
+
+
+class FullScanEngine(TournamentEngine):
+    def _propagate_from(self, st, match_id):
+        self._propagate(st)
+
+
+rng = random.Random(20261103)
+prop_ok = True
+prop_checks = 0
+for fmt, n in ((Format.DOUBLE_ELIM, 64), (Format.DOUBLE_ELIM, 37),
+               (Format.SINGLE_ELIM, 45), (Format.DOUBLE_ELIM, 5),
+               (Format.DOUBLE_ELIM, 3)):
+    e = TournamentEngine()
+    e.setup(Config(title="伝播", format=fmt, third_place=True))
+    e.register_players(names_n(n))
+    e.shuffle(rng.randrange(10 ** 6))
+    e.generate()
+    while True:
+        ready = e.ready_matches()
+        if not ready:
+            break
+        m = rng.choice(ready)
+        ws = rng.choice((1, 2))
+        if rng.random() < 0.2:
+            e.report(m.match_id, ws, forfeit=True)
+        else:
+            need = m.best_of // 2 + 1
+            x = rng.randrange(need)
+            e.report(m.match_id, ws, *((need, x) if ws == 1 else (x, need)))
+        if e.can_undo() and rng.random() < 0.05:
+            e.undo_last()
+        # 64人は再生に時間がかかるので、ときどき比べる
+        if n < 40 or len(e.actions) % 7 == 0 or not e.ready_matches():
+            prop_checks += 1
+            if sig(FullScanEngine.from_dict(e.to_dict())) != sig(e):
+                prop_ok = False
+check(prop_ok and prop_checks > 100,
+      f"結果の反映: 全試合を走査する再生と同じ状態({prop_checks}回比較)")
+
+# 形式ごとの下限を下回る生成は EngineError(読み上げられる)になる
+e = TournamentEngine()
+e.setup(Config(title="x", format=Format.SINGLE_ELIM))
+e.register_players(["A", "B"])
+e.setup(Config(title="x", format=Format.DOUBLE_ELIM))
+err = False
+try:
+    e.generate()
+except EngineError:
+    err = True
+check(err, "生成の失敗は EngineError")
+
+# 2人枠のルーザーズ配置は作れない(以前はループが終わらなかった)
+err = False
+try:
+    lb_template(2)
+except ValueError:
+    err = True
+check(err, "ルーザーズ配置: 2人枠は ValueError(止まらない)")
+
+# ラウンドごとの試合数は生成時に数える(文の生成は状態を書き換えない)
+e = new_engine(Format.DOUBLE_ELIM, names_n(9))
+check(e.state.round_sizes.get((Phase.WINNERS, 1)) == 8
+      and e.state.round_sizes.get((Phase.GRAND_FINAL, 1)) == 1,
+      "ラウンドごとの試合数は生成時に数えてある")
+
+# 選手名の確かめ方は、登録ダイアログと登録で同じ(engine.check_player_names)
+from domain import check_player_names
+check(check_player_names([" A ", "B"], Format.SINGLE_ELIM) == ["A", "B"],
+      "選手名: 前後の空白を除く")
+for names, fmt, label in ((["A", "A", "B"], Format.SINGLE_ELIM, "重複"),
+                          (["A", ""], Format.SINGLE_ELIM, "空の名前"),
+                          (["A", "B"], Format.DOUBLE_ELIM, "ダブルエリミ2人"),
+                          (names_n(65), Format.ROUND_ROBIN, "65人")):
+    err = False
+    try:
+        check_player_names(names, fmt)
+    except EngineError:
+        err = True
+    check(err, f"選手名: {label}は EngineError")
+
+# 総当たりの順位表(直接対決を1回の走査で数える)が、選手ごとに数える方法と同じ
+def league_table_reference(state):
+    """以前の数え方(選手ごとに全試合をたどる)。比べるためだけに使う。"""
+    from collections import defaultdict
+    stats = {p.player_id: {"wins": 0, "losses": 0, "gw": 0, "gl": 0}
+             for p in state.players}
+    done = [m for m in state.matches.values()
+            if m.phase == Phase.LEAGUE and m.result is not None]
+    for m in done:
+        stats[m.winner_id()]["wins"] += 1
+        stats[m.loser_id()]["losses"] += 1
+        a, b = m.slot1.resolved_id, m.slot2.resolved_id
+        stats[a]["gw"] += m.result.score1
+        stats[a]["gl"] += m.result.score2
+        stats[b]["gw"] += m.result.score2
+        stats[b]["gl"] += m.result.score1
+    groups = defaultdict(list)
+    for pid, st in stats.items():
+        groups[st["wins"]].append(pid)
+    keymap = {}
+    for wins, members in groups.items():
+        mset = set(members)
+        for pid in members:
+            h2h = sum(1 for m in done
+                      if m.winner_id() == pid and m.loser_id() in mset)
+            keymap[pid] = (-wins, -h2h, -(stats[pid]["gw"] - stats[pid]["gl"]))
+    seed_of = {p.player_id: p.seed for p in state.players}
+    ordered = sorted(stats, key=lambda pid: (keymap[pid], seed_of[pid]))
+    rows, prev, rank = [], None, 0
+    for i, pid in enumerate(ordered):
+        if keymap[pid] != prev:
+            rank, prev = i + 1, keymap[pid]
+        rows.append((rank, pid))
+    return rows
+
+
+rng = random.Random(7)
+table_ok = True
+for trial in range(120):
+    n = rng.randrange(2, 13)
+    e = new_engine(Format.ROUND_ROBIN, names_n(n))
+    for m in list(e.matches_play_order()):
+        if rng.random() < 0.8:
+            ws = rng.choice((1, 2))
+            x = rng.randrange(2)
+            e.report(m.match_id, ws, *((2, x) if ws == 1 else (x, 2)))
+    got = [(row["rank"], row["player_id"])
+           for row in standings.league_table(e.state)]
+    if got != league_table_reference(e.state):
+        table_ok = False
+check(table_ok, "リーグ順位表: 直接対決の数え方を変えても以前と同じ順位")
+
+# 総当たりには敗退が無い(1回負けても「敗退」と言わない)
+e = new_engine(Format.ROUND_ROBIN, ["A", "B", "C", "D"])
+rr_report(e, "p1", "p4")
+path_text = textgen.player_path(e.state, "p4")
+check(not path_text.endswith("敗退。") and "残り2試合" in path_text,
+      f"総当たり: 負けても敗退と言わない({path_text})")
+check(standings.elimination_groups(e.state) == [],
+      "総当たり: 敗退グループは空")
+
+# 選手別ビューの一括生成は、1人ずつの生成と同じ
+for fmt, n in ((Format.DOUBLE_ELIM, 9), (Format.ROUND_ROBIN, 6),
+               (Format.SINGLE_ELIM, 7)):
+    e = new_engine(fmt, names_n(n), third_place=True)
+    for _ in range(5):
+        if e.ready_matches():
+            m = e.ready_matches()[0]
+            e.report(m.match_id, 2, *((0, m.best_of // 2 + 1)))
+    check(textgen.player_paths(e.state)
+          == [textgen.player_path(e.state, p.player_id)
+              for p in e.state.players],
+          f"{fmt.value}{n}人: 選手別の一括生成は1人ずつと同じ")
+
+# 総当たり: 優勝者の出ない試合で全試合が終わっても、終了と優勝者を伝える
+e = new_engine(Format.ROUND_ROBIN, ["A", "B", "C", "D"])
+for w, lo in (("p1", "p2"), ("p1", "p3"), ("p1", "p4"),
+              ("p2", "p3"), ("p2", "p4")):
+    rr_report(e, w, lo)
+rr_report(e, "p3", "p4")  # 最後は C 対 D
+last = [m for m in e.state.matches.values()
+        if frozenset(m.players()) == frozenset(("p3", "p4"))][0]
+ann = textgen.report_announcement(e.state, last)
+check(ann == "Cの勝ち、2対0。全試合終了。Aの優勝です。",
+      f"総当たり: 最後の試合で優勝を伝える({ann})")
+e = new_engine(Format.ROUND_ROBIN, ["A", "B", "C"])
+rr_report(e, "p1", "p2")
+rr_report(e, "p2", "p3")
+rr_report(e, "p3", "p1")
+last = [m for m in e.state.matches.values()
+        if frozenset(m.players()) == frozenset(("p1", "p3"))][0]
+ann = textgen.report_announcement(e.state, last)
+check(ann.endswith("全試合終了。同率首位のため優勝者は未確定です。"),
+      f"総当たり: 同率首位で終わったことを伝える({ann})")
+e = new_engine(Format.ROUND_ROBIN, ["A", "B", "C"])
+rr_report(e, "p1", "p2")
+ann = textgen.report_announcement(e.state, [
+    m for m in e.state.matches.values()
+    if frozenset(m.players()) == frozenset(("p1", "p2"))][0])
+check(ann == "Aの勝ち、2対0。", f"総当たり: 途中の試合は勝敗だけ({ann})")
+
+# 終了後に途中の試合のスコアを直しても、その試合の敗者を準優勝と言わない
+e = new_engine(Format.SINGLE_ELIM, ["A", "B", "C", "D"])
+e.report("W1-1", 1, 2, 0)
+e.report("W1-2", 1, 2, 0)
+e.report("W2-1", 1, 3, 0)
+e.edit_result("W1-1", 1, 2, 1)
+ann = textgen.report_announcement(e.state, e.state.matches["W1-1"])
+check("準優勝" not in ann and "優勝です" not in ann and "準決勝で敗退" in ann,
+      f"修正: 途中の試合の敗者は準優勝ではない({ann})")
+ann = textgen.report_announcement(e.state, e.state.matches["W2-1"])
+check(ann.endswith("Aの優勝です。Bは準優勝。"), f"決勝の読み上げは変わらない({ann})")
+
+# 大会が無いときの全体状況(F5)
+summary = textgen.overall_summary(TournamentEngine().state)
+check(summary == "大会がありません。Ctrl+Nで新規作成、Ctrl+Oで読み込みできます。",
+      f"大会が無いときの全体状況({summary})")
+
+# ---------- K. 英語表記 ----------
+note("=== K. 英語表記 ===")
+ja_keys = i18n.catalog_keys("ja")
+en_keys = i18n.catalog_keys("en")
+check(ja_keys == en_keys,
+      f"文言のキーが日英で一致(日本語のみ {sorted(ja_keys - en_keys)} / "
+      f"英語のみ {sorted(en_keys - ja_keys)})")
+
+
+def _fields(text: str) -> set:
+    return {f for _l, f, _s, _c in string.Formatter().parse(text) if f}
+
+
+from i18n import en as _en, ja as _ja
+mismatch = [k for k in ja_keys & en_keys
+            if _fields(_ja.MESSAGES[k]) != _fields(_en.MESSAGES[k])]
+check(not mismatch, f"差し込む値の名前が日英で一致 {mismatch}")
+check(len(_ja.MESSAGES["help.lines"].split("\n"))
+      == len(_en.MESSAGES["help.lines"].split("\n")),
+      "キー操作一覧の行数が日英で一致")
+
+i18n.set_language("en")
+try:
+    check([i18n.place(n) for n in (1, 2, 3, 4, 11, 12, 13, 21, 22, 64)]
+          == ["1st place", "2nd place", "3rd place", "4th place",
+              "11th place", "12th place", "13th place", "21st place",
+              "22nd place", "64th place"], "英語の順位表記")
+
+    e = new_engine(Format.DOUBLE_ELIM, ["Tanaka", "Suzuki", "Sato", "Ito"],
+                   title="Test Cup")
+    e.report("W1-1", 1, 2, 0)
+    ann = textgen.report_announcement(e.state, e.state.matches["W1-1"])
+    note("EN: " + ann)
+    check(ann == "Tanaka wins, 2 to 0. Tanaka advances to Winners Final. "
+                 "Ito goes to Losers Semifinal.", "英語: 結果の読み上げ")
+    line = textgen.match_line(e.state, e.state.matches["W1-2"])
+    check(line == "Winners Semifinal, Match 2: Suzuki vs Sato. Ready to play",
+          f"英語: 試合の行({line})")
+    for mid, ws, a, b in (("W1-2", 1, 2, 0), ("W2-1", 1, 3, 0),
+                          ("L1-1", 1, 2, 0), ("L2-1", 1, 3, 0),
+                          ("GF", 2, 1, 3)):
+        e.report(mid, ws, a, b)
+    ann = textgen.report_announcement(e.state, e.state.matches["GF"])
+    check(ann.startswith("Ito wins, 3 to 1. Bracket reset."),
+          f"英語: リセット({ann})")
+    e.report("GFR", 1, 3, 0)
+    ann = textgen.report_announcement(e.state, e.state.matches["GFR"])
+    check(ann == "Tanaka wins, 3 to 0. Tanaka is the champion. "
+                 "Ito finishes second.", f"英語: 優勝({ann})")
+    lines = textgen.standings_lines(e.state)
+    check(lines[:3] == ["Tournament finished. Final standings:",
+                        "1st place: Tanaka", "2nd place: Ito"],
+          f"英語: 確定順位 {lines[:3]}")
+    summary = textgen.overall_summary(e.state)
+    check(summary == "Test Cup, Double Elimination, players: 4. "
+                     "Matches completed: 7 of 7. Champion: Tanaka.",
+          f"英語: 全体状況({summary})")
+
+    # すべての形式・人数で、英語の文に日本語が混ざらない
+    import re
+    # かな・漢字に加えて、和文の句読点・括弧・長音・全角の記号も日本語とみなす
+    jp = re.compile("[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]")
+    leak = []
+    for fmt, n in ((Format.SINGLE_ELIM, 13), (Format.DOUBLE_ELIM, 13),
+                   (Format.ROUND_ROBIN, 7), (Format.SINGLE_ELIM, 64)):
+        e = new_engine(fmt, [f"P{i}" for i in range(n)], title="Cup",
+                       third_place=True)
+        for step in range(3):
+            texts = [textgen.overall_summary(e.state)]
+            texts += [textgen.match_line(e.state, m)
+                      for m in e.matches_bracket_order()]
+            texts += [textgen.player_path(e.state, p.player_id)
+                      for p in e.state.players]
+            texts += textgen.standings_lines(e.state)
+            leak += [x for x in texts if jp.search(x)]
+            if step < 2:
+                play_all(e) if step == 1 else e.report(
+                    e.ready_matches()[0].match_id, 2, forfeit=True)
+    check(not leak, f"英語: 日本語の混入なし {leak[:3]}")
+
+    summary = textgen.overall_summary(TournamentEngine().state)
+    check(not jp.search(summary) and summary.startswith("No tournament"),
+          f"英語: 大会が無いときの全体状況に日本語が混ざらない({summary})")
+    check([i18n.rank_label(n) for n in (1, 2, 3, 11, 12, 13, 21, 111)]
+          == ["1st", "2nd", "3rd", "11th", "12th", "13th", "21st", "111th"],
+          "英語: 表の順位の表記")
+
+    err_text = ""
+    try:
+        e.report("W1-1", 1, 2, 0)
+    except EngineError as exc:
+        err_text = str(exc)
+    check(err_text == "This match is not ready to be played yet",
+          f"英語: エラー文({err_text})")
+finally:
+    i18n.set_language("ja")
+check(textgen.format_name(Format.ROUND_ROBIN) == "総当たりリーグ",
+      "日本語に戻すと日本語の文")
+
+# ---------- L. 日本語の文の固定 ----------
+note("=== L. 日本語の文の固定 ===")
+# 決まった手順で大会を進め、出てくる文をすべて golden_ja.txt と比べる。
+# golden_ja.txt は v1.0.3 と同じ文(総当たりで「敗退」と言わない・最終戦で優勝を伝える、
+# の2点だけが違う)。文言を変えたときは、意図した変更か確かめてから作り直すこと。
+
+
+def transcript_ja() -> list[str]:
+    out: list[str] = []
+
+    def engine(fmt, names, title, **cfg):
+        e = TournamentEngine()
+        e.setup(Config(title=title, format=fmt, **cfg))
+        e.register_players(names)
+        e.generate()
+        return e
+
+    def dump(e, head):
+        st = e.state
+        out.append(f"## {head}")
+        out.extend(textgen.match_line(st, m) for m in e.matches_bracket_order())
+        out.extend(textgen.player_path(st, p.player_id) for p in st.players)
+        out.extend(textgen.standings_lines(st))
+        out.append(textgen.overall_summary(st))
+
+    def play(e, head, pick):
+        step = 0
+        while e.ready_matches():
+            m = e.ready_matches()[0]
+            ws, forfeit = pick(step, m)
+            need = m.best_of // 2 + 1
+            x = step % need
+            if forfeit:
+                e.report(m.match_id, ws, forfeit=True)
+            else:
+                e.report(m.match_id, ws,
+                         *((need, x) if ws == 1 else (x, need)))
+            out.append(textgen.report_announcement(
+                e.state, e.state.matches[m.match_id]))
+            step += 1
+            if step == 4:
+                dump(e, head + " 途中")
+        dump(e, head + " 終了")
+
+    e = engine(Format.DOUBLE_ELIM, ["田中", "鈴木", "佐藤", "伊藤", "高橋"],
+               "金曜杯")
+    dump(e, "双5 生成直後")
+    play(e, "双5", lambda step, m: (
+        2 if m.match_id == "GF" or step % 3 == 1 else 1, step == 2))
+    e = engine(Format.SINGLE_ELIM, ["A", "B", "C", "D", "E", "F"], "週末杯",
+               third_place=True, best_of_wf=5, best_of_3p=1)
+    play(e, "単6", lambda step, m: (1 if step % 2 == 0 else 2, step == 5))
+    e = engine(Format.ROUND_ROBIN, ["赤", "青", "黄", "緑"], "リーグ")
+    play(e, "総4", lambda step, m: (1 if step % 3 else 2, step == 4))
+    e = engine(Format.ROUND_ROBIN, ["甲", "乙", "丙"], "三すくみ")
+    play(e, "総3", lambda step, m: (2 if step == 1 else 1, False))
+    return out
+
+
+golden_lines = (Path(__file__).parent / "golden_ja.txt").read_text(
+    encoding="utf-8").splitlines()
+actual_lines = transcript_ja()
+if actual_lines != golden_lines:
+    (Path(__file__).parent / "result_golden_ja.txt").write_text(
+        "\n".join(actual_lines) + "\n", encoding="utf-8")
+    first = next((i for i, (a, b) in enumerate(zip(actual_lines, golden_lines))
+                  if a != b), min(len(actual_lines), len(golden_lines)))
+    note(f"日本語の文が golden_ja.txt と違う(最初の違いは {first + 1} 行目)。"
+         "tests/result_golden_ja.txt と比べること")
+check(actual_lines == golden_lines,
+      f"日本語の文が golden_ja.txt と一致({len(golden_lines)}行)")
+
+# ---------- V. 修正の取り消し(v1.0.4) ----------
+note("=== V. 修正の取り消し ===")
 e = new_engine(Format.SINGLE_ELIM, names_n(8))
 e.report("W1-1", 1, 2, 0)
 e.report("W1-2", 1, 2, 0)
@@ -450,19 +936,19 @@ except EngineError:
     err = True
 check(err, "結果の無い試合は修正できない")
 
-# ---------- K. 人数と壊れたデータ ----------
-note("=== K. 人数と壊れたデータ ===")
+# ---------- W. 人数と壊れたデータ(v1.0.4) ----------
+note("=== W. 人数と壊れたデータ ===")
 e = TournamentEngine()
 e.setup(Config(title="2人", format=Format.DOUBLE_ELIM))
-e.register_players(["A", "B"])
 msg = ""
 try:
+    e.register_players(["A", "B"])
     e.generate()
 except EngineError as exc:
     msg = str(exc)
 except Exception as exc:  # EngineError 以外で止まってはいけない
     msg = "別の例外: " + type(exc).__name__
-check("3人以上" in msg, f"双2人: 読み上げられる文で断る({msg})")
+check("3人" in msg, f"双2人: 読み上げられる文で断る({msg})")
 check(not e.state.generated, "双2人: 断った後は未生成のまま")
 
 bad_files = [
@@ -475,9 +961,9 @@ bad_files = [
         {"kind": "setup", "payload": {
             "title": "T", "format": "single_elim", "best_of_default": 4,
             "best_of_finals": 5, "gf_reset": True, "third_place": False}}]}),
-    ("17人", {"format_version": 1, "actions": [
+    ("65人", {"format_version": 1, "actions": [
         {"kind": "register_players",
-         "payload": {"names": [str(i) for i in range(17)]}},
+         "payload": {"names": [str(i) for i in range(65)]}},
         {"kind": "generate", "payload": {}}]}),
 ]
 for label, data in bad_files:
@@ -509,8 +995,8 @@ check(not save_path.with_name(save_path.name + ".tmp").exists(),
       "保存: 一時ファイルが残らない")
 check(sig(TournamentEngine.load(save_path)) == sig(e), "保存: 上書きして読み直せる")
 
-# ---------- L. 終了時の読み上げと並び ----------
-note("=== L. 終了時の読み上げと並び ===")
+# ---------- X. 終了時の読み上げと並び(v1.0.4) ----------
+note("=== X. 終了時の読み上げと並び ===")
 e = new_engine(Format.ROUND_ROBIN, ["A", "B", "C"])
 rr_report(e, "p1", "p2")
 rr_report(e, "p1", "p3")

@@ -5,28 +5,54 @@
   差し替え、勝者が変わるなら下流(winner_to / loser_to の推移閉包)の report を外して
   新しい結果を末尾に置く。修正もログに残るので、undo で修正の前へ戻せる
 - 並び順は set_order として記録する
+- 結果の反映は、報告した試合から行き先(winner_to / loser_to)をたどる範囲だけを
+  更新する(総当たり64人の2016試合でも、再生が全試合の走査の繰り返しにならない)
 """
 from __future__ import annotations
 
 import json
 import os
+import random
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from i18n import t
+
 from . import standings
 from .bracket_double import build_double_elim
 from .bracket_single import build_single_elim
-from .models import (Config, Format, Match, MatchResult, MatchState, Player,
-                     SourceType, TournamentState, bracket_sort_key,
-                     play_order_key, winners_rounds)
+from .models import (MAX_PLAYERS, Config, Format, Match, MatchResult,
+                     MatchState, Player, SourceType, TournamentState,
+                     bracket_sort_key, min_players, play_order_key,
+                     winners_rounds)
 from .round_robin import build_round_robin
 
 FORMAT_VERSION = 1
 
 
 class EngineError(Exception):
-    """操作エラー。メッセージはそのまま読み上げに使える日本語にする。"""
+    """操作エラー。メッセージはそのまま読み上げに使える文(現在の言語)にする。"""
+
+
+def check_player_count(count: int, fmt: Format) -> None:
+    """形式ごとの人数の範囲(ダブルエリミだけ下限3人、上限は64人)。外れたら EngineError。"""
+    low = min_players(fmt)
+    if not (low <= count <= MAX_PLAYERS):
+        raise EngineError(t("err.player_count", min=low, max=MAX_PLAYERS))
+
+
+def check_player_names(names: list[str], fmt: Format) -> list[str]:
+    """選手名の一覧を確かめ、前後の空白を除いた一覧を返す。問題があれば EngineError。
+    選手登録ダイアログ(入力を残したまま知らせる)と register_players が同じ規則を使う。"""
+    cleaned = [n.strip() for n in names]
+    if any(not n for n in cleaned):
+        raise EngineError(t("err.empty_name"))
+    if len(cleaned) != len(set(cleaned)):
+        raise EngineError(t("err.duplicate_name"))
+    check_player_count(len(cleaned), fmt)
+    return cleaned
 
 
 @dataclass
@@ -58,20 +84,23 @@ class TournamentEngine:
         self._commit(self.actions + [Action("setup", payload)])
 
     def register_players(self, names: list[str]) -> None:
-        cleaned = [n.strip() for n in names]
-        if any(not n for n in cleaned):
-            raise EngineError("空の選手名があります")
-        if len(cleaned) != len(set(cleaned)):
-            raise EngineError("選手名が重複しています")
-        if not (2 <= len(cleaned) <= 16):
-            raise EngineError("選手は2人から16人までです")
+        cleaned = check_player_names(names, self.state.config.format)
         self._commit(self.actions + [Action("register_players",
                                             {"names": cleaned})])
+
+    def shuffle(self, rng_seed: Optional[int] = None) -> None:
+        """並び順をシャッフルして set_order として記録する。"""
+        ids = [p.player_id for p in self.state.players]
+        if not ids:
+            raise EngineError(t("err.no_players"))
+        rng = random.Random(rng_seed)
+        rng.shuffle(ids)
+        self.set_order(ids)
 
     def set_order(self, ordered_ids: list[str]) -> None:
         current = {p.player_id for p in self.state.players}
         if len(ordered_ids) != len(current) or set(ordered_ids) != current:
-            raise EngineError("並び順の指定が選手一覧と一致しません")
+            raise EngineError(t("err.order_mismatch"))
         self._commit(self.actions + [Action("set_order",
                                             {"order": list(ordered_ids)})])
 
@@ -95,7 +124,7 @@ class TournamentEngine:
     def undo_last(self) -> str:
         """直近の結果入力または修正を取り消し、対象の試合IDを返す。"""
         if not self.can_undo():
-            raise EngineError("取り消せる結果入力がありません")
+            raise EngineError(t("err.nothing_to_undo"))
         mid = self.actions[-1].payload["match_id"]
         self._commit(self.actions[:-1])
         return mid
@@ -104,7 +133,7 @@ class TournamentEngine:
         """match_id の結果を修正した場合にクリアされうる下流試合のID一覧。
         勝者が変わらない修正(スコア訂正)の場合、実際にはクリアされない。"""
         if match_id not in self.state.matches:
-            raise EngineError("試合が見つかりません")
+            raise EngineError(t("err.match_not_found"))
         affected = self._descendants(match_id)
         out: list[str] = []
         for mid in self.state.match_order:
@@ -121,9 +150,9 @@ class TournamentEngine:
         勝者が変わらない場合はスコアの差し替えのみ(下流はそのまま)。"""
         m = self.state.matches.get(match_id)
         if m is None:
-            raise EngineError("試合が見つかりません")
+            raise EngineError(t("err.match_not_found"))
         if m.result is None or m.result.auto_bye:
-            raise EngineError("この試合には修正できる結果がありません")
+            raise EngineError(t("err.no_result_to_edit"))
 
         new_payload = {"match_id": match_id, "winner_slot": winner_slot,
                        "score1": score1, "score2": score2, "forfeit": forfeit}
@@ -139,7 +168,7 @@ class TournamentEngine:
     def match(self, match_id: str) -> Match:
         m = self.state.matches.get(match_id)
         if m is None:
-            raise EngineError("試合が見つかりません")
+            raise EngineError(t("err.match_not_found"))
         return m
 
     def matches_bracket_order(self) -> list[Match]:
@@ -170,9 +199,9 @@ class TournamentEngine:
     @classmethod
     def from_dict(cls, data: dict) -> "TournamentEngine":
         if not isinstance(data, dict):
-            raise EngineError("大会ファイルではありません")
+            raise EngineError(t("err.not_a_tournament_file"))
         if data.get("format_version") != FORMAT_VERSION:
-            raise EngineError("保存データの形式バージョンが対応外です")
+            raise EngineError(t("err.format_version"))
         eng = cls()
         try:
             eng._commit([Action(d["kind"], dict(d["payload"]))
@@ -180,7 +209,7 @@ class TournamentEngine:
         except EngineError:
             raise
         except (KeyError, TypeError, ValueError, AttributeError, IndexError):
-            raise EngineError("大会ファイルの内容が壊れています") from None
+            raise EngineError(t("err.broken_file")) from None
         return eng
 
     def save(self, path) -> None:
@@ -197,7 +226,7 @@ class TournamentEngine:
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
         except ValueError:  # JSON でない、UTF-8 でない
-            raise EngineError("大会ファイルとして読めません") from None
+            raise EngineError(t("err.unreadable_file")) from None
         return cls.from_dict(data)
 
     # ---------- 内部 ----------
@@ -238,7 +267,7 @@ class TournamentEngine:
                         if a.kind == "report"
                         and a.payload["match_id"] == mid), None)
             if idx is None:
-                raise EngineError("この試合には修正できる結果がありません")
+                raise EngineError(t("err.no_result_to_edit"))
             new = Action("report", dict(act.payload))
             if (int(out[idx].payload["winner_slot"])
                     == int(act.payload["winner_slot"])):
@@ -255,12 +284,12 @@ class TournamentEngine:
         kind, p = act.kind, act.payload
         if kind == "setup":
             if st.generated:
-                raise EngineError("生成後に設定は変更できません")
+                raise EngineError(t("err.setup_after_generate"))
 
             def _bo(v) -> int:
                 n = int(v)
                 if n < 1 or n % 2 == 0:
-                    raise EngineError("セット数の設定が不正です")
+                    raise EngineError(t("err.bad_best_of"))
                 return n
 
             def _opt(key: str):
@@ -279,47 +308,46 @@ class TournamentEngine:
                 best_of_3p=_opt("best_of_3p"))
         elif kind == "register_players":
             if st.generated:
-                raise EngineError("生成後に選手は変更できません")
+                raise EngineError(t("err.players_after_generate"))
             st.players = [Player(f"p{i + 1}", name, i + 1)
                           for i, name in enumerate(p["names"])]
         elif kind == "set_order":
             if st.generated:
-                raise EngineError("生成後に並び順は変更できません")
+                raise EngineError(t("err.order_after_generate"))
             pmap = {pl.player_id: pl for pl in st.players}
             st.players = [pmap[pid] for pid in p["order"]]
             for i, pl in enumerate(st.players):
                 pl.seed = i + 1
         elif kind == "generate":
             if st.generated:
-                raise EngineError("ブラケットは生成済みです")
+                raise EngineError(t("err.already_generated"))
             fmt = st.config.format
-            if not (2 <= len(st.players) <= 16):
-                raise EngineError("選手は2人から16人までです")
-            try:
-                if fmt == Format.SINGLE_ELIM:
-                    ms = build_single_elim(st.players, st.config)
-                elif fmt == Format.DOUBLE_ELIM:
-                    ms = build_double_elim(st.players, st.config)
-                else:
-                    ms = build_round_robin(st.players, st.config)
-            except ValueError as exc:
-                # 人数が形式に足りないとき。そのまま読み上げに使える文にする
-                raise EngineError(str(exc)) from None
+            # 人数は登録時にも確かめるが、登録後に形式を変えた場合や
+            # 手で作った保存データもあるので、生成の直前にも確かめる
+            check_player_count(len(st.players), fmt)
+            if fmt == Format.SINGLE_ELIM:
+                ms = build_single_elim(st.players, st.config)
+            elif fmt == Format.DOUBLE_ELIM:
+                ms = build_double_elim(st.players, st.config)
+            else:
+                ms = build_round_robin(st.players, st.config)
             st.matches = {m.match_id: m for m in ms}
             st.match_order = [m.match_id for m in ms]
+            # 生成後は構造が変わらないので、ラウンドごとの試合数をここで数えておく
+            st.round_sizes = dict(Counter((m.phase, m.round_no) for m in ms))
             st.generated = True
             self._propagate(st)
         elif kind == "report":
             if not st.generated:
-                raise EngineError("ブラケットが生成されていません")
+                raise EngineError(t("err.not_generated"))
             m = st.matches.get(p["match_id"])
             if m is None:
-                raise EngineError("試合が見つかりません")
+                raise EngineError(t("err.match_not_found"))
             if m.state() != MatchState.READY:
-                raise EngineError("この試合はまだ対戦できる状態ではありません")
+                raise EngineError(t("err.not_ready"))
             ws = int(p["winner_slot"])
             if ws not in (1, 2):
-                raise EngineError("勝者スロットの指定が不正です")
+                raise EngineError(t("err.bad_winner_slot"))
             if p.get("forfeit"):
                 m.result = MatchResult(ws, 0, 0, forfeit=True)
             else:
@@ -328,11 +356,11 @@ class TournamentEngine:
                 win_score = s1 if ws == 1 else s2
                 lose_score = s2 if ws == 1 else s1
                 if win_score != needed or not (0 <= lose_score < needed):
-                    raise EngineError(f"スコアがBO{m.best_of}として不正です")
+                    raise EngineError(t("err.bad_score", bo=m.best_of))
                 m.result = MatchResult(ws, s1, s2)
-            self._propagate(st)
+            self._propagate_from(st, m.match_id)
         else:
-            raise EngineError(f"未知の操作です: {kind}")
+            raise EngineError(t("err.unknown_action", kind=kind))
 
     def _propagate(self, st: TournamentState) -> None:
         """スロット解決・BYE自動消化・リセット戦制御を固定点まで繰り返す。"""
@@ -353,29 +381,65 @@ class TournamentEngine:
                             if rid is not None:
                                 slot.resolved_id = rid
                                 changed = True
-                if (m.result is None and not m.skipped
-                        and m.slot1.is_resolved() and m.slot2.is_resolved()):
-                    b1, b2 = m.slot1.is_bye(), m.slot2.is_bye()
-                    if b1 or b2:
-                        # BYEの自動消化(両方BYEなら slot1 側が勝ち上がる)
-                        winner_slot = 2 if (b1 and not b2) else 1
-                        m.result = MatchResult(winner_slot, 0, 0,
-                                               auto_bye=True)
-                        changed = True
-            # リセット戦の制御
-            gf = st.matches.get("GF")
-            gfr = st.matches.get("GFR")
-            if gf is not None and gfr is not None and gf.result is not None:
-                if gf.result.winner_slot == 2:
-                    if gfr.skipped or gfr.slot1.resolved_id is None:
-                        gfr.skipped = False
-                        gfr.slot1.resolved_id = gf.slot1.resolved_id
-                        gfr.slot2.resolved_id = gf.slot2.resolved_id
-                        changed = True
-                else:
-                    if not gfr.skipped:
-                        gfr.skipped = True
-                        changed = True
+                if self._auto_bye(m):
+                    changed = True
+            if self._control_reset(st):
+                changed = True
+
+    @staticmethod
+    def _auto_bye(m: Match) -> bool:
+        """両スロットが確定していて片方(または両方)が BYE なら自動消化する。
+        両方 BYE なら slot1 側が勝ち上がる。消化したら True。"""
+        if (m.result is not None or m.skipped
+                or not (m.slot1.is_resolved() and m.slot2.is_resolved())):
+            return False
+        b1, b2 = m.slot1.is_bye(), m.slot2.is_bye()
+        if not (b1 or b2):
+            return False
+        winner_slot = 2 if (b1 and not b2) else 1
+        m.result = MatchResult(winner_slot, 0, 0, auto_bye=True)
+        return True
+
+    @staticmethod
+    def _control_reset(st: TournamentState) -> bool:
+        """リセット戦の制御。状態を変えたら True。"""
+        gf = st.matches.get("GF")
+        gfr = st.matches.get("GFR")
+        if gf is None or gfr is None or gf.result is None:
+            return False
+        if gf.result.winner_slot == 2:
+            if gfr.skipped or gfr.slot1.resolved_id is None:
+                gfr.skipped = False
+                gfr.slot1.resolved_id = gf.slot1.resolved_id
+                gfr.slot2.resolved_id = gf.slot2.resolved_id
+                return True
+            return False
+        if not gfr.skipped:
+            gfr.skipped = True
+            return True
+        return False
+
+    def _propagate_from(self, st: TournamentState, match_id: str) -> None:
+        """match_id に結果が入った直後の伝播。行き先の試合だけをたどる。
+
+        スロットを参照するのは、参照元の試合の winner_to / loser_to だけ
+        (wire_routes が張る)なので、そこをたどれば _propagate と同じ状態になる。
+        行き先の試合が BYE で自動消化されたら、さらにその行き先へ進む。"""
+        queue = [match_id]
+        while queue:
+            src = st.matches[queue.pop()]
+            if src.match_id == "GF":
+                self._control_reset(st)
+            for dest, rid in ((src.winner_to, src.winner_id()),
+                              (src.loser_to, src.loser_id())):
+                if dest is None or rid is None:
+                    continue
+                dm = st.matches[dest[0]]
+                slot = dm.slot1 if dest[1] == 1 else dm.slot2
+                if slot.resolved_id is None:
+                    slot.resolved_id = rid
+                if self._auto_bye(dm):
+                    queue.append(dm.match_id)
 
     def _descendants(self, match_id: str,
                      st: Optional[TournamentState] = None) -> set[str]:

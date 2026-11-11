@@ -2,8 +2,11 @@
 // fg_tournament relay - トーナメント状態の保存/取得
 //
 // 保存: POST tournament_relay.php?action=put&token=<hex16-64>
-//       ヘッダ X-Admin-Key: <管理キー> / ボディ: JSON (最大512KB)
+//       ヘッダ X-Admin-Key: <管理キー> / ボディ: JSON (最大2MB)
 // 取得: GET  tournament_relay.php?action=get&token=<hex16-64>
+//       ETag 付き。If-None-Match が一致すれば 304。Accept-Encoding: gzip なら圧縮して返す
+//       &have=<前に受け取った ETag の中身> を付けると、内容が同じとき {"ok":true,"unchanged":true} だけを返す
+//       (手前の中継が If-None-Match を取り除くサーバーでも、送り直しを省けるようにするため)
 // 削除: POST tournament_relay.php?action=delete&token=<hex16-64>
 //       ヘッダ X-Admin-Key: <管理キー>(閲覧URLを作り直したとき、古いデータを消す)
 //
@@ -11,7 +14,8 @@
 declare(strict_types=1);
 
 const ADMIN_KEY = '__ADMIN_KEY__';
-const MAX_BYTES = 524288; // 512KB
+// 64人の総当たりリーグ(2016試合)で約0.8MBになるため、余裕を見て2MB
+const MAX_BYTES = 2097152; // 2MB
 
 header('X-Content-Type-Options: nosniff');
 
@@ -49,9 +53,51 @@ if ($action === 'get') {
     if (!is_file($path)) {
         fail(404, 'not found');
     }
+    $body = @file_get_contents($path);
+    if ($body === false) {
+        fail(500, 'read error');
+    }
+    // 閲覧ページは15秒ごとに取りに来る。内容が変わっていなければ 304 で本文を送らない
+    // (64人の総当たりは数百KBになるため)。no-cache は「毎回確かめてから使う」の意味
+    $etag = '"' . md5($body) . '"';
+    header('Cache-Control: no-cache');
+    header('ETag: ' . $etag);
+    header('Vary: Accept-Encoding');
+    $inm = isset($_SERVER['HTTP_IF_NONE_MATCH'])
+        ? (string)$_SERVER['HTTP_IF_NONE_MATCH'] : '';
+    foreach (explode(',', $inm) as $tag) {
+        $tag = trim($tag);
+        if (strncmp($tag, 'W/', 2) === 0) {
+            $tag = substr($tag, 2);
+        }
+        if ($tag === $etag) {
+            http_response_code(304);
+            exit;
+        }
+    }
     header('Content-Type: application/json; charset=utf-8');
-    header('Cache-Control: no-store');
-    readfile($path);
+    // 閲覧ページが前に受け取った内容の印を URL で知らせてきたとき。
+    // If-None-Match は、手前の中継(キャッシュ)が取り除いて届かないサーバーがある
+    $have = isset($_GET['have']) ? (string)$_GET['have'] : '';
+    if ($have !== '' && hash_equals($etag, '"' . $have . '"')) {
+        echo json_encode(['ok' => true, 'unchanged' => true]);
+        exit;
+    }
+    $accept = isset($_SERVER['HTTP_ACCEPT_ENCODING'])
+        ? (string)$_SERVER['HTTP_ACCEPT_ENCODING'] : '';
+    // サーバー側で圧縮する設定(zlib.output_compression)なら二重に圧縮しない
+    if (function_exists('gzencode') && stripos($accept, 'gzip') !== false
+            && !ini_get('zlib.output_compression')) {
+        $gz = gzencode($body, 6);
+        if ($gz !== false) {
+            header('Content-Encoding: gzip');
+            header('Content-Length: ' . strlen($gz));
+            echo $gz;
+            exit;
+        }
+    }
+    header('Content-Length: ' . strlen($body));
+    echo $body;
     exit;
 }
 

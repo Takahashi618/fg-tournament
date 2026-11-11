@@ -63,18 +63,18 @@ def league_table(state: TournamentState) -> list[dict]:
             stats[b]["gw"] += m.result.score2
             stats[b]["gl"] += m.result.score1
 
-    groups: dict[int, list[str]] = defaultdict(list)
-    for pid, st in stats.items():
-        groups[st["wins"]].append(pid)
+    # 直接対決: 同じ勝ち数の相手に勝った数(試合を1回たどるだけで数える。
+    # 64人の総当たりでは選手ごとに全試合を数え直すと遅くなるため)
+    h2h: dict[str, int] = defaultdict(int)
+    for m in done:
+        w, lo = m.winner_id(), m.loser_id()
+        if (w in stats and lo in stats
+                and stats[w]["wins"] == stats[lo]["wins"]):
+            h2h[w] += 1
 
     keymap: dict[str, tuple] = {}
-    for wins, members in groups.items():
-        mset = set(members)
-        for pid in members:
-            h2h = sum(1 for m in done
-                      if m.winner_id() == pid and m.loser_id() in mset)
-            diff = stats[pid]["gw"] - stats[pid]["gl"]
-            keymap[pid] = (-wins, -h2h, -diff)
+    for pid, st in stats.items():
+        keymap[pid] = (-st["wins"], -h2h[pid], -(st["gw"] - st["gl"]))
 
     seed_of = {p.player_id: p.seed for p in state.players}
     ordered = sorted(stats.keys(),
@@ -121,7 +121,9 @@ def _loss_records(state: TournamentState) -> dict[str, tuple]:
 
 def elimination_groups(state: TournamentState) -> list[tuple[Phase, int, list[str]]]:
     """進行中でも使える敗退状況。(phase, round_no, 選手IDリスト) を敗退が遅い順に返す。
-    優勝者は含まない。"""
+    優勝者は含まない。総当たりリーグには敗退が無いので空。"""
+    if state.config.format == Format.ROUND_ROBIN:
+        return []
     champ = champion_id(state)
     grouped: dict[tuple, list[str]] = defaultdict(list)
     meta: dict[tuple, tuple] = {}

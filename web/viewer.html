@@ -72,12 +72,12 @@ footer { margin-top: 24px; color: var(--done); font-size: 0.85rem; }
 </head>
 <body>
 <header>
-  <h1 id="title">読み込み中…</h1>
+  <h1 id="title" data-i18n="loading">読み込み中…</h1>
   <p id="summary"></p>
-  <div class="controls" role="group" aria-label="表示切替">
-    <button id="mode-list" aria-pressed="true">リスト表示</button>
-    <button id="mode-bracket" aria-pressed="false">ブラケット表示</button>
-    <button id="reload">今すぐ更新</button>
+  <div class="controls" role="group" id="controls" aria-label="表示切替">
+    <button id="mode-list" aria-pressed="true" data-i18n="modeList">リスト表示</button>
+    <button id="mode-bracket" aria-pressed="false" data-i18n="modeBracket">ブラケット表示</button>
+    <button id="reload" data-i18n="reload">今すぐ更新</button>
     <span id="updated"></span>
   </div>
   <p id="live" aria-live="polite"></p>
@@ -85,7 +85,7 @@ footer { margin-top: 24px; color: var(--done); font-size: 0.85rem; }
 </header>
 <main>
   <section aria-labelledby="standings-h">
-    <h2 id="standings-h">順位・状況</h2>
+    <h2 id="standings-h" data-i18n="standings">順位・状況</h2>
     <div id="standings"></div>
   </section>
   <section id="list-view" aria-label="試合一覧(リスト)"></section>
@@ -93,14 +93,89 @@ footer { margin-top: 24px; color: var(--done); font-size: 0.85rem; }
     <div class="bracket-wrap" id="bracket-root"></div>
   </section>
 </main>
-<footer>15秒ごとに自動更新します。</footer>
+<footer data-i18n="footer">15秒ごとに自動更新します。</footer>
 <script>
 "use strict";
+// 画面の固定の文言。試合や順位の文はアプリが作ってスナップショットに入れる
+// (その言語は data.lang)。データが届く前はブラウザの言語で選ぶ。
+const STRINGS = {
+  ja: {
+    pageTitle: "大会ビューアー",
+    loading: "読み込み中…",
+    controls: "表示切替",
+    modeList: "リスト表示",
+    modeBracket: "ブラケット表示",
+    reload: "今すぐ更新",
+    standings: "順位・状況",
+    listView: "試合一覧(リスト)",
+    bracketView: "試合一覧(ブラケット)",
+    footer: "15秒ごとに自動更新します。",
+    noToken: "URLにトークンがありません。主催者から届いたURLをそのまま開いてください。",
+    fetchFailed: (msg) => "取得に失敗しました(" + msg + ")。前回の内容を表示しています。",
+    fetchFailedFirst: (msg) => "取得に失敗しました(" + msg + ")。しばらくすると自動でもう一度試します。",
+    notFoundFirst: "このURLの大会はまだ公開されていないか、URLが変わりました。主催者に確認してください。",
+    notFoundLater: "このURLでの公開は終わりました。表示は最後に届いた内容です。主催者に新しいURLを確認してください。",
+    updated: "最終更新 ",
+    liveUpdate: "更新: ",
+    titleFormat: (title, fmt) => title + "(" + fmt + ")",
+    colPlace: "順位", colPlayer: "選手", colWins: "勝", colLosses: "敗",
+    colDiff: "得失差",
+    secWinners: "ウィナーズ側", secLosers: "ルーザーズ側", secFinals: "決勝",
+    markForfeit: "不戦勝", markBye: "不戦", markWin: "勝",
+  },
+  en: {
+    pageTitle: "Tournament Viewer",
+    loading: "Loading…",
+    controls: "View",
+    modeList: "List view",
+    modeBracket: "Bracket view",
+    reload: "Refresh now",
+    standings: "Standings",
+    listView: "Matches (list)",
+    bracketView: "Matches (bracket)",
+    footer: "This page refreshes every 15 seconds.",
+    noToken: "The URL has no token. Open the URL exactly as the organizer sent it.",
+    fetchFailed: (msg) => "Could not load the latest data (" + msg + "). Showing the last data received.",
+    fetchFailedFirst: (msg) => "Could not load the data (" + msg + "). The page will try again shortly.",
+    notFoundFirst: "This tournament is not published yet, or the URL has changed. Ask the organizer.",
+    notFoundLater: "Publishing at this URL has ended. You are seeing the last data received. Ask the organizer for the new URL.",
+    updated: "Last updated ",
+    liveUpdate: "Update: ",
+    titleFormat: (title, fmt) => title + " (" + fmt + ")",
+    colPlace: "Place", colPlayer: "Player", colWins: "Wins", colLosses: "Losses",
+    colDiff: "Game difference",
+    secWinners: "Winners side", secLosers: "Losers side", secFinals: "Finals",
+    markForfeit: "Forfeit win", markBye: "Bye", markWin: "Win",
+  },
+};
+let lang = (navigator.language || "").toLowerCase().startsWith("ja") ? "ja" : "en";
+const S = () => STRINGS[lang];
+
+// 固定の文言を言語に合わせる。見出しとページ名は render() がこのあと上書きする
+function applyLanguage(code) {
+  if (STRINGS[code]) lang = code;
+  document.documentElement.lang = lang;
+  document.querySelectorAll("[data-i18n]").forEach(e => {
+    e.textContent = S()[e.getAttribute("data-i18n")];
+  });
+  $("controls").setAttribute("aria-label", S().controls);
+  $("list-view").setAttribute("aria-label", S().listView);
+  $("bracket-view").setAttribute("aria-label", S().bracketView);
+  document.title = S().pageTitle;
+}
+
+// 順位の表記はアプリが作る(place_label)。以前の版のアプリのデータには無い(日本語)
+function placeLabel(label, n) {
+  return label || (n + "位");
+}
+
 const params = new URLSearchParams(location.search);
 const TOKEN = params.get("t") || "";
 const RELAY = "tournament_relay.php";
 let firstLoad = true;
 let prevEvent = null;
+let lastText = null;
+let lastEtag = "";  // 前に受け取った内容の印(サーバーの ETag の中身)
 
 const $ = (id) => document.getElementById(id);
 function el(tag, cls) {
@@ -112,59 +187,74 @@ function showError(msg) { $("error").textContent = msg; }
 
 async function load() {
   if (!TOKEN) {
-    showError("URLにトークンがありません。主催者から届いたURLをそのまま開いてください。");
+    showError(S().noToken);
     return;
   }
   try {
-    const res = await fetch(
-      RELAY + "?action=get&token=" + encodeURIComponent(TOKEN),
-      { cache: "no-store" });
+    // no-cache: 毎回サーバーに確かめるが、変わっていなければ(304)本文は送られない。
+    // 304 の判定に使うヘッダーを手前の中継が取り除くサーバーもあるので、
+    // 前に受け取った内容の印を have でも知らせる(同じなら短い返事だけが返る)
+    let url = RELAY + "?action=get&token=" + encodeURIComponent(TOKEN);
+    if (lastEtag) url += "&have=" + encodeURIComponent(lastEtag);
+    const res = await fetch(url, { cache: "no-cache" });
     if (res.status === 404) {
       // まだ公開されていないか、主催者が閲覧URLを作り直した
-      if (firstLoad) {
-        $("title").textContent = "大会ビューアー";
-        showError("このURLの大会はまだ公開されていないか、URLが変わりました。主催者に確認してください。");
-      } else {
-        showError("このURLでの公開は終わりました。表示は最後に届いた内容です。主催者に新しいURLを確認してください。");
-      }
+      if (firstLoad) $("title").textContent = S().pageTitle;
+      showError(firstLoad ? S().notFoundFirst : S().notFoundLater);
       return;
     }
     if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
-    render(data);
+    const text = await res.text();
+    // 内容が同じなら描き直さない(スクリーンリーダーで読んでいる位置を動かさない)
+    if (text !== lastText) {
+      const data = JSON.parse(text);
+      // unchanged は「前と同じ」というサーバーの返事。画面はそのままにする
+      if (data.unchanged !== true) {
+        render(data);
+        lastText = text;
+        lastEtag = (res.headers.get("ETag") || "")
+          .replace(/^W\//, "").replace(/"/g, "");
+      }
+    }
     showError("");
   } catch (e) {
     if (firstLoad) {
-      $("title").textContent = "大会ビューアー";
-      showError("取得に失敗しました(" + e.message + ")。しばらくすると自動でもう一度試します。");
+      $("title").textContent = S().pageTitle;
+      showError(S().fetchFailedFirst(e.message));
     } else {
-      showError("取得に失敗しました(" + e.message + ")。前回の内容を表示しています。");
+      showError(S().fetchFailed(e.message));
     }
   }
 }
 
 function render(data) {
-  document.title = data.title + " - 大会ビューアー";
-  $("title").textContent = data.title + "(" + data.format_name + ")";
+  // 以前の版のアプリのスナップショットには lang が無い(日本語)
+  const dataLang = data.lang || "ja";
+  if (dataLang !== lang) applyLanguage(dataLang);
+  document.title = data.title + " - " + S().pageTitle;
+  $("title").textContent = S().titleFormat(data.title, data.format_name);
   $("summary").textContent = data.summary || "";
   try {
     const d = new Date(data.updated_at);
-    $("updated").textContent = "最終更新 " + d.toLocaleTimeString("ja-JP");
+    $("updated").textContent = S().updated
+      + d.toLocaleTimeString(lang === "ja" ? "ja-JP" : "en");
   } catch (e) { $("updated").textContent = ""; }
 
   if (!firstLoad && data.last_event && data.last_event !== prevEvent) {
-    $("live").textContent = "更新: " + data.last_event;
+    $("live").textContent = S().liveUpdate + data.last_event;
   }
   prevEvent = data.last_event;
 
   renderStandings(data);
   renderList(data);
-  renderBracket(data);
 
   if (data.format === "round_robin") {
+    // 総当たりにはブラケット表示が無い(作っても見えないので作らない)
+    $("bracket-root").replaceChildren();
     $("mode-bracket").hidden = true;
     setMode("list");
   } else {
+    renderBracket(data);
     $("mode-bracket").hidden = false;
   }
   firstLoad = false;
@@ -175,16 +265,16 @@ function renderStandings(data) {
   root.replaceChildren();
   if (data.league_table && data.league_table.length) {
     root.appendChild(buildTable(
-      ["順位", "選手", "勝", "敗", "得失差"],
+      [S().colPlace, S().colPlayer, S().colWins, S().colLosses, S().colDiff],
       data.league_table.map(r =>
-        [r.rank + "位", r.name, r.wins, r.losses,
+        [placeLabel(r.place_label, r.rank), r.name, r.wins, r.losses,
          (r.diff > 0 ? "+" : "") + r.diff])));
     return;
   }
   if (data.placements && data.placements.length) {
     root.appendChild(buildTable(
-      ["順位", "選手"],
-      data.placements.map(r => [r.place + "位", r.name])));
+      [S().colPlace, S().colPlayer],
+      data.placements.map(r => [placeLabel(r.place_label, r.place), r.name])));
     return;
   }
   const ul = el("ul", "matches");
@@ -246,9 +336,9 @@ function renderBracket(data) {
   const root = $("bracket-root");
   root.replaceChildren();
   const sections = [
-    ["ウィナーズ側", ["winners", "league"]],
-    ["ルーザーズ側", ["losers"]],
-    ["決勝", ["third_place", "grand_final", "grand_final_reset"]],
+    [S().secWinners, ["winners", "league"]],
+    [S().secLosers, ["losers"]],
+    [S().secFinals, ["third_place", "grand_final", "grand_final_reset"]],
   ];
   sections.forEach(([name, phases]) => {
     const ms = data.matches.filter(m => phases.includes(m.phase));
@@ -291,7 +381,8 @@ function row(m, name, score, isWinner) {
   r.appendChild(n);
   if (isWinner) {
     const w = el("span", "mark");
-    w.textContent = m.forfeit ? "不戦勝" : (m.auto ? "不戦" : "勝");
+    w.textContent = m.forfeit ? S().markForfeit
+      : (m.auto ? S().markBye : S().markWin);
     r.appendChild(w);
   }
   if (score !== null && score !== undefined) {
@@ -317,6 +408,7 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) load();
 });
 setInterval(() => { if (!document.hidden) load(); }, 15000);
+applyLanguage(lang);
 load();
 </script>
 </body>

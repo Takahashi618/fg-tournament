@@ -5,6 +5,7 @@
 - すべてのウィジェットに SetName を付ける
 - キーはパネルの EVT_CHAR_HOOK で処理(文字キーは使わない。F8/Enter/EscはIMEセーフ)
 - OK/キャンセルはパネル親 + EndModal 直接バインド
+- 文言は i18n から取る(ダイアログは開くたびに作るので、そのときの言語で出る)
 """
 from __future__ import annotations
 
@@ -12,18 +13,18 @@ import random
 
 import wx
 
-from domain import Config, Format
+from domain import Config, EngineError, Format, check_player_names
 from domain import textgen
-from publish.uploader import (URL_SCHEME_MESSAGE, is_safe_relay_url,
-                              new_token, viewer_url_for)
+from domain.models import MAX_PLAYERS, min_players
+from i18n import t
+from publish.uploader import is_safe_relay_url, new_token, viewer_url_for
 
-_FORMATS = [
-    ("ダブルエリミネーション", Format.DOUBLE_ELIM),
-    ("シングルエリミネーション", Format.SINGLE_ELIM),
-    ("総当たりリーグ", Format.ROUND_ROBIN),
-]
-_BO_CHOICES = [("1本先取(BO1)", 1), ("2本先取(BO3)", 3),
-               ("3本先取(BO5)", 5), ("4本先取(BO7)", 7)]
+_FORMATS = [Format.DOUBLE_ELIM, Format.SINGLE_ELIM, Format.ROUND_ROBIN]
+_BO_CHOICES = [1, 3, 5, 7]
+
+
+def _bo_label(best_of: int) -> str:
+    return t(f"bo.{best_of}")
 
 
 def _is_enter(code: int) -> bool:
@@ -34,61 +35,56 @@ class SetupDialog(wx.Dialog):
     """大会の基本設定。OKなら get_config() で Config を返す。"""
 
     def __init__(self, parent):
-        super().__init__(parent, title="新規大会の設定", size=(640, 660))
+        super().__init__(parent, title=t("setup.title"), size=(640, 660))
         panel = wx.Panel(self)
-        panel.SetName("新規大会の設定")
+        panel.SetName(t("setup.title"))
         s = wx.BoxSizer(wx.VERTICAL)
 
-        lbl = wx.StaticText(panel, label="大会名")
+        lbl = wx.StaticText(panel, label=t("setup.name"))
         s.Add(lbl, 0, wx.LEFT | wx.TOP, 8)
-        self.title_ctrl = wx.TextCtrl(panel, value="大会")
-        self.title_ctrl.SetName("大会名")
+        self.title_ctrl = wx.TextCtrl(panel, value=t("setup.default_title"))
+        self.title_ctrl.SetName(t("setup.name"))
         s.Add(self.title_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
-        lbl = wx.StaticText(panel, label="形式")
+        lbl = wx.StaticText(panel, label=t("setup.format"))
         s.Add(lbl, 0, wx.LEFT | wx.TOP, 8)
-        self.format_choice = wx.Choice(panel,
-                                       choices=[n for n, _ in _FORMATS])
-        self.format_choice.SetName("形式")
+        self.format_choice = wx.Choice(
+            panel, choices=[textgen.format_name(f) for f in _FORMATS])
+        self.format_choice.SetName(t("setup.format"))
         self.format_choice.SetSelection(0)
         s.Add(self.format_choice, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
-        def _bo_choice(label: str, name: str, default_index: int) -> wx.Choice:
+        def _bo_choice(label: str, name: str | None,
+                       default_index: int) -> wx.Choice:
             lb = wx.StaticText(panel, label=label)
             s.Add(lb, 0, wx.LEFT | wx.TOP, 8)
-            ch = wx.Choice(panel, choices=[n for n, _ in _BO_CHOICES])
-            ch.SetName(name)
+            ch = wx.Choice(panel, choices=[_bo_label(b) for b in _BO_CHOICES])
+            ch.SetName(name or label)
             ch.SetSelection(default_index)
             s.Add(ch, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
             return ch
 
         # 既定: 通常戦=BO3、決勝系=BO5
-        self.bo_default = _bo_choice("通常戦のセット数", "通常戦のセット数", 1)
-        self.bo_wf_c = _bo_choice("決勝(ウィナーズ決勝)のセット数",
-                                  "決勝のセット数", 2)
-        self.bo_lf_c = _bo_choice("ルーザーズ決勝のセット数(ダブルエリミ)",
-                                  "ルーザーズ決勝のセット数", 2)
-        self.bo_gf_c = _bo_choice("グランドファイナルのセット数(リセット戦も同じ)",
-                                  "グランドファイナルのセット数", 2)
-        self.bo_3p_c = _bo_choice("3位決定戦のセット数(シングルエリミ)",
-                                  "3位決定戦のセット数", 2)
+        self.bo_default = _bo_choice(t("setup.bo_default"), None, 1)
+        self.bo_wf_c = _bo_choice(t("setup.bo_wf"), t("setup.bo_wf_name"), 2)
+        self.bo_lf_c = _bo_choice(t("setup.bo_lf"), t("setup.bo_lf_name"), 2)
+        self.bo_gf_c = _bo_choice(t("setup.bo_gf"), t("setup.bo_gf_name"), 2)
+        self.bo_3p_c = _bo_choice(t("setup.bo_3p"), t("setup.bo_3p_name"), 2)
 
-        self.reset_check = wx.CheckBox(
-            panel, label="グランドファイナルのリセット戦あり(ダブルエリミ)")
-        self.reset_check.SetName("リセット戦あり")
+        self.reset_check = wx.CheckBox(panel, label=t("setup.reset"))
+        self.reset_check.SetName(t("setup.reset_name"))
         self.reset_check.SetValue(True)
         s.Add(self.reset_check, 0, wx.ALL, 8)
 
-        self.third_check = wx.CheckBox(
-            panel, label="3位決定戦あり(シングルエリミ)")
-        self.third_check.SetName("3位決定戦あり")
+        self.third_check = wx.CheckBox(panel, label=t("setup.third"))
+        self.third_check.SetName(t("setup.third_name"))
         s.Add(self.third_check, 0, wx.LEFT | wx.RIGHT, 8)
 
         btns = wx.BoxSizer(wx.HORIZONTAL)
-        ok = wx.Button(panel, label="次へ")
-        ok.SetName("次へ")
-        cancel = wx.Button(panel, label="キャンセル")
-        cancel.SetName("キャンセル")
+        ok = wx.Button(panel, label=t("btn.next"))
+        ok.SetName(t("btn.next"))
+        cancel = wx.Button(panel, label=t("btn.cancel"))
+        cancel.SetName(t("btn.cancel"))
         btns.Add(ok, 0, wx.ALL, 8)
         btns.Add(cancel, 0, wx.ALL, 8)
         s.Add(btns, 0, wx.ALIGN_CENTER)
@@ -110,15 +106,15 @@ class SetupDialog(wx.Dialog):
         event.Skip()
 
     def _on_ok(self):
-        title = self.title_ctrl.GetValue().strip() or "大会"
-        wf = _BO_CHOICES[self.bo_wf_c.GetSelection()][1]
-        lf = _BO_CHOICES[self.bo_lf_c.GetSelection()][1]
-        gf = _BO_CHOICES[self.bo_gf_c.GetSelection()][1]
-        tp = _BO_CHOICES[self.bo_3p_c.GetSelection()][1]
+        title = self.title_ctrl.GetValue().strip() or t("setup.default_title")
+        wf = _BO_CHOICES[self.bo_wf_c.GetSelection()]
+        lf = _BO_CHOICES[self.bo_lf_c.GetSelection()]
+        gf = _BO_CHOICES[self.bo_gf_c.GetSelection()]
+        tp = _BO_CHOICES[self.bo_3p_c.GetSelection()]
         self._config = Config(
             title=title,
-            format=_FORMATS[self.format_choice.GetSelection()][1],
-            best_of_default=_BO_CHOICES[self.bo_default.GetSelection()][1],
+            format=_FORMATS[self.format_choice.GetSelection()],
+            best_of_default=_BO_CHOICES[self.bo_default.GetSelection()],
             best_of_finals=gf,  # 互換用の既定値(GFの値を入れる)
             gf_reset=self.reset_check.GetValue(),
             third_place=self.third_check.GetValue(),
@@ -132,28 +128,30 @@ class SetupDialog(wx.Dialog):
 
 class PlayersDialog(wx.Dialog):
     """選手登録。OKなら get_names() で名前リストを返す。
-    入力欄でEnterを押すたびに、確定した名前と現在の人数を読み上げる。"""
+    入力欄でEnterを押すたびに、確定した名前と現在の人数を読み上げる。
+    人数の下限は形式で変わる(ダブルエリミだけ3人)。"""
 
-    def __init__(self, parent, speaker, min_players: int = 2):
-        super().__init__(parent, title="選手登録", size=(560, 520))
+    def __init__(self, parent, speaker, fmt: Format = Format.SINGLE_ELIM):
+        super().__init__(parent, title=t("players.title"), size=(560, 520))
         self._speaker = speaker
-        self._min = min_players
+        self._fmt = fmt
+        self._min = min_players(fmt)
         panel = wx.Panel(self)
-        panel.SetName("選手登録")
+        panel.SetName(t("players.title"))
         s = wx.BoxSizer(wx.VERTICAL)
 
-        lbl = wx.StaticText(panel,
-                            label=f"選手名を1行に1人ずつ入力({min_players}〜16人)")
+        lbl = wx.StaticText(panel, label=t("players.label", min=self._min,
+                                           max=MAX_PLAYERS))
         s.Add(lbl, 0, wx.ALL, 8)
         self.text = wx.TextCtrl(panel, style=wx.TE_MULTILINE)
-        self.text.SetName("選手名入力。1行に1人")
+        self.text.SetName(t("players.input_name"))
         s.Add(self.text, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
         btns = wx.BoxSizer(wx.HORIZONTAL)
-        ok = wx.Button(panel, label="次へ")
-        ok.SetName("次へ")
-        cancel = wx.Button(panel, label="キャンセル")
-        cancel.SetName("キャンセル")
+        ok = wx.Button(panel, label=t("btn.next"))
+        ok.SetName(t("btn.next"))
+        cancel = wx.Button(panel, label=t("btn.cancel"))
+        cancel.SetName(t("btn.cancel"))
         btns.Add(ok, 0, wx.ALL, 8)
         btns.Add(cancel, 0, wx.ALL, 8)
         s.Add(btns, 0, wx.ALIGN_CENTER)
@@ -190,21 +188,15 @@ class PlayersDialog(wx.Dialog):
             return
         count = len([ln for ln in self.text.GetValue().splitlines()
                      if ln.strip()])
-        self._speaker.say(f"{name}、{count}人目")
+        self._speaker.say(t("players.entered", name=name, n=count))
 
     def _on_ok(self):
-        names = [ln.strip() for ln in self.text.GetValue().splitlines()
-                 if ln.strip()]
-        if not (self._min <= len(names) <= 16):
-            msg = f"選手は{self._min}人から16人までです。"
-            if self._min > 2:
-                msg = "ダブルエリミネーションでは、" + msg
-            wx.MessageBox(msg + f"いまは{len(names)}人です。", "エラー",
-                          wx.OK | wx.ICON_ERROR, self)
-            self.text.SetFocus()
-            return
-        if len(names) != len(set(names)):
-            wx.MessageBox("選手名が重複しています。", "エラー",
+        names = [ln for ln in self.text.GetValue().splitlines() if ln.strip()]
+        try:
+            # 登録と同じ規則で確かめる。だめならダイアログを閉じずに入力を残す
+            names = check_player_names(names, self._fmt)
+        except EngineError as exc:
+            wx.MessageBox(str(exc), t("dlg.error"),
                           wx.OK | wx.ICON_ERROR, self)
             return
         self._names = names
@@ -218,28 +210,27 @@ class OrderDialog(wx.Dialog):
     """並び順の確認とシャッフル。OKなら get_order() で選手IDリストを返す。"""
 
     def __init__(self, parent, state, speaker):
-        super().__init__(parent, title="並び順(シード順)", size=(560, 520))
+        super().__init__(parent, title=t("order.title"), size=(560, 520))
         self._state = state
         self._speaker = speaker
         self._ids = [p.player_id for p in state.players]
         panel = wx.Panel(self)
-        panel.SetName("並び順")
+        panel.SetName(t("order.panel"))
         s = wx.BoxSizer(wx.VERTICAL)
 
-        lbl = wx.StaticText(
-            panel, label="現在の並び順。F8またはシャッフルボタンで並び替え")
+        lbl = wx.StaticText(panel, label=t("order.label"))
         s.Add(lbl, 0, wx.ALL, 8)
         self.listbox = wx.ListBox(panel)
-        self.listbox.SetName("並び順一覧")
+        self.listbox.SetName(t("order.list"))
         s.Add(self.listbox, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
         btns = wx.BoxSizer(wx.HORIZONTAL)
-        shuffle_btn = wx.Button(panel, label="シャッフル(F8)")
-        shuffle_btn.SetName("シャッフル")
-        ok = wx.Button(panel, label="この順で生成")
-        ok.SetName("この順で生成")
-        cancel = wx.Button(panel, label="キャンセル")
-        cancel.SetName("キャンセル")
+        shuffle_btn = wx.Button(panel, label=t("order.shuffle_button"))
+        shuffle_btn.SetName(t("order.shuffle_name"))
+        ok = wx.Button(panel, label=t("order.generate"))
+        ok.SetName(t("order.generate"))
+        cancel = wx.Button(panel, label=t("btn.cancel"))
+        cancel.SetName(t("btn.cancel"))
         btns.Add(shuffle_btn, 0, wx.ALL, 8)
         btns.Add(ok, 0, wx.ALL, 8)
         btns.Add(cancel, 0, wx.ALL, 8)
@@ -254,7 +245,7 @@ class OrderDialog(wx.Dialog):
         self.listbox.SetFocus()
 
     def _refresh(self):
-        names = [f"{i + 1}番 {self._state.name_of(pid)}"
+        names = [t("order.item", i=i + 1, name=self._state.name_of(pid))
                  for i, pid in enumerate(self._ids)]
         self.listbox.Set(names)
         if names:
@@ -263,12 +254,12 @@ class OrderDialog(wx.Dialog):
     def _on_shuffle(self, event=None):
         random.shuffle(self._ids)
         self._refresh()
-        order_text = "。".join(
-            f"{i + 1}番 {self._state.name_of(pid)}"
+        order_text = t("phrase_sep").join(
+            t("order.item", i=i + 1, name=self._state.name_of(pid))
             for i, pid in enumerate(self._ids))
         # 一覧更新直後の自動読み上げに割り込まれないよう少し遅らせる
         wx.CallLater(200, self._speaker.say,
-                     "シャッフルしました。" + order_text)
+                     t("order.shuffled", order=order_text))
 
     def _on_key(self, event):
         code = event.GetKeyCode()
@@ -292,7 +283,7 @@ class ResultDialog(wx.Dialog):
     dict(winner_slot, score1, score2, forfeit) を返す。"""
 
     def __init__(self, parent, state, match, editing: bool = False):
-        title = "結果の修正" if editing else "結果入力"
+        title = t("result.title_edit") if editing else t("result.title")
         super().__init__(parent,
                          title=f"{title}: {textgen.match_label(state, match)}",
                          size=(600, 480))
@@ -303,31 +294,37 @@ class ResultDialog(wx.Dialog):
         # 候補: n1側のスイープ→接戦、n2側の接戦→スイープ、最後に不戦勝
         self._cands: list[tuple[str, tuple[int, int, int, bool]]] = []
         for x in range(needed):
-            self._cands.append((f"{n1} {needed}対{x}", (1, needed, x, False)))
+            self._cands.append((t("result.score", name=n1, a=needed, b=x),
+                                (1, needed, x, False)))
         for x in range(needed - 1, -1, -1):
-            self._cands.append((f"{n2} {needed}対{x}", (2, needed, x, False)))
-        self._cands.append((f"{n1}の不戦勝({n2}の棄権)", (1, 0, 0, True)))
-        self._cands.append((f"{n2}の不戦勝({n1}の棄権)", (2, 0, 0, True)))
+            self._cands.append((t("result.score", name=n2, a=needed, b=x),
+                                (2, needed, x, False)))
+        self._cands.append((t("result.forfeit", w=n1, lo=n2),
+                            (1, 0, 0, True)))
+        self._cands.append((t("result.forfeit", w=n2, lo=n1),
+                            (2, 0, 0, True)))
 
         panel = wx.Panel(self)
         panel.SetName(title)
         s = wx.BoxSizer(wx.VERTICAL)
 
-        head = f"{n1} 対 {n2}。結果を選んでEnter"
+        head = t("result.head", n1=n1, n2=n2)
         if editing and match.result is not None:
             cur_w = state.name_of(match.winner_id())
             if match.result.forfeit:
-                head = f"現在の結果: {cur_w}の不戦勝。" + head
+                current = t("result.current_forfeit", w=cur_w)
             else:
                 r = match.result
                 ws, ls = ((r.score1, r.score2) if r.winner_slot == 1
                           else (r.score2, r.score1))
-                head = f"現在の結果: {cur_w}の勝ち、{ws}対{ls}。" + head
-        lbl = wx.StaticText(panel, label=head)
+                current = t("result.current", w=cur_w, ws=ws, ls=ls)
+            head = t("sentence_sep").join([current, head])
+        # 選手名の「&」をニーモニック(下線付きのアクセスキー)にしない
+        lbl = wx.StaticText(panel, label=wx.Control.EscapeMnemonics(head))
         s.Add(lbl, 0, wx.ALL, 8)
 
         self.listbox = wx.ListBox(panel, choices=[c[0] for c in self._cands])
-        self.listbox.SetName("結果候補")
+        self.listbox.SetName(t("result.list"))
         s.Add(self.listbox, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
         # 修正時は現在の結果を選択済みにする
@@ -345,10 +342,10 @@ class ResultDialog(wx.Dialog):
         self.listbox.SetSelection(sel)
 
         btns = wx.BoxSizer(wx.HORIZONTAL)
-        ok = wx.Button(panel, label="決定")
-        ok.SetName("決定")
-        cancel = wx.Button(panel, label="キャンセル")
-        cancel.SetName("キャンセル")
+        ok = wx.Button(panel, label=t("btn.ok"))
+        ok.SetName(t("btn.ok"))
+        cancel = wx.Button(panel, label=t("btn.cancel"))
+        cancel.SetName(t("btn.cancel"))
         btns.Add(ok, 0, wx.ALL, 8)
         btns.Add(cancel, 0, wx.ALL, 8)
         s.Add(btns, 0, wx.ALIGN_CENTER)
@@ -386,30 +383,28 @@ class ImpactConfirmDialog(wx.Dialog):
     """結果修正の影響確認。クリアされる試合を一覧で示す。"""
 
     def __init__(self, parent, state, match_ids: list[str]):
-        super().__init__(parent, title="修正の影響確認", size=(600, 440))
+        super().__init__(parent, title=t("impact.title"), size=(600, 440))
         panel = wx.Panel(self)
-        panel.SetName("修正の影響確認")
+        panel.SetName(t("impact.title"))
         s = wx.BoxSizer(wx.VERTICAL)
 
-        lbl = wx.StaticText(
-            panel,
-            label=f"この修正で以下の{len(match_ids)}件の試合結果がクリアされます。"
-                  "よろしいですか?")
+        lbl = wx.StaticText(panel,
+                            label=t("impact.label", n=len(match_ids)))
         s.Add(lbl, 0, wx.ALL, 8)
 
         lines = [textgen.match_line(state, state.matches[mid])
                  for mid in match_ids]
         self.listbox = wx.ListBox(panel, choices=lines)
-        self.listbox.SetName("クリアされる試合の一覧")
+        self.listbox.SetName(t("impact.list"))
         if lines:
             self.listbox.SetSelection(0)
         s.Add(self.listbox, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
         btns = wx.BoxSizer(wx.HORIZONTAL)
-        ok = wx.Button(panel, label="クリアして修正する")
-        ok.SetName("クリアして修正する")
-        cancel = wx.Button(panel, label="やめる")
-        cancel.SetName("やめる")
+        ok = wx.Button(panel, label=t("impact.ok"))
+        ok.SetName(t("impact.ok"))
+        cancel = wx.Button(panel, label=t("impact.cancel"))
+        cancel.SetName(t("impact.cancel"))
         btns.Add(ok, 0, wx.ALL, 8)
         btns.Add(cancel, 0, wx.ALL, 8)
         s.Add(btns, 0, wx.ALIGN_CENTER)
@@ -428,41 +423,28 @@ class ImpactConfirmDialog(wx.Dialog):
         event.Skip()
 
 
-HELP_LINES = [
-    "Enter: 選択した試合の結果入力。入力済みの試合なら修正",
-    "F5: 全体状況の読み上げ",
-    "F6: ビュー切替(ラウンド別 → 選手別 → 次の試合 → 順位)",
-    "Ctrl+Z: 直前の結果入力または修正の取り消し",
-    "Ctrl+N: 新規大会の作成",
-    "Ctrl+O: 大会ファイルを開く",
-    "Ctrl+S: 上書き保存 / Ctrl+Shift+S: 名前を付けて保存",
-    "Ctrl+U: 今すぐアップロード(公開が有効なとき)",
-    "公開メニュー: オンライン閲覧の設定、閲覧URLの発行とコピー",
-    "結果入力: 上下で候補を選んでEnter。Escで中止",
-    "並び順ダイアログ: F8でシャッフル",
-    "順位ビュー: 大会終了で確定順位、進行中は敗退状況を表示",
-    "結果入力のたびに data フォルダへ自動保存されます",
-]
+def help_lines() -> list[str]:
+    return t("help.lines").split("\n")
 
 
 class HelpDialog(wx.Dialog):
     """キー操作一覧。"""
 
     def __init__(self, parent):
-        super().__init__(parent, title="キー操作一覧", size=(640, 480))
+        super().__init__(parent, title=t("help.title"), size=(640, 480))
         panel = wx.Panel(self)
-        panel.SetName("キー操作一覧")
+        panel.SetName(t("help.title"))
         s = wx.BoxSizer(wx.VERTICAL)
 
-        lbl = wx.StaticText(panel, label="キー操作一覧。上下で読み上げ")
+        lbl = wx.StaticText(panel, label=t("help.label"))
         s.Add(lbl, 0, wx.ALL, 8)
-        self.listbox = wx.ListBox(panel, choices=HELP_LINES)
-        self.listbox.SetName("キー操作一覧")
+        self.listbox = wx.ListBox(panel, choices=help_lines())
+        self.listbox.SetName(t("help.title"))
         self.listbox.SetSelection(0)
         s.Add(self.listbox, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
-        close = wx.Button(panel, label="閉じる")
-        close.SetName("閉じる")
+        close = wx.Button(panel, label=t("btn.close"))
+        close.SetName(t("btn.close"))
         s.Add(close, 0, wx.ALIGN_CENTER | wx.ALL, 8)
         panel.SetSizer(s)
 
@@ -486,48 +468,45 @@ class PublishDialog(wx.Dialog):
     (relay のURL, トークン) が入る。呼び出し側がサーバーの古い内容を消す。"""
 
     def __init__(self, parent, publisher):
-        super().__init__(parent, title="公開設定(オンライン閲覧)",
-                         size=(680, 560))
+        super().__init__(parent, title=t("pub.title"), size=(680, 560))
         self._pub = publisher
         self._new_token = ""   # 発行ボタンで作った、まだ保存していないトークン
         self.retired = None
         panel = wx.Panel(self)
-        panel.SetName("公開設定")
+        panel.SetName(t("pub.panel"))
         s = wx.BoxSizer(wx.VERTICAL)
 
-        self.enable_check = wx.CheckBox(
-            panel, label="オンライン公開を有効にする(結果入力のたびに自動アップロード)")
-        self.enable_check.SetName("オンライン公開を有効にする")
+        self.enable_check = wx.CheckBox(panel, label=t("pub.enable"))
+        self.enable_check.SetName(t("pub.enable_name"))
         self.enable_check.SetValue(publisher.enabled)
         s.Add(self.enable_check, 0, wx.ALL, 8)
 
-        lbl = wx.StaticText(panel, label="relay のURL(https:// で始まるもの)")
+        lbl = wx.StaticText(panel, label=t("pub.relay"))
         s.Add(lbl, 0, wx.LEFT | wx.TOP, 8)
         self.url_ctrl = wx.TextCtrl(panel, value=publisher.relay_url)
-        self.url_ctrl.SetName("relayのURL")
+        self.url_ctrl.SetName(t("pub.relay_name"))
         s.Add(self.url_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
-        lbl = wx.StaticText(
-            panel, label="管理キー(サーバー側と同じ値。設定済みなら空欄のままで変更なし)")
+        lbl = wx.StaticText(panel, label=t("pub.key"))
         s.Add(lbl, 0, wx.LEFT | wx.TOP, 8)
         self.key_ctrl = wx.TextCtrl(panel)
-        self.key_ctrl.SetName("管理キー")
+        self.key_ctrl.SetName(t("pub.key_name"))
         s.Add(self.key_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
-        lbl = wx.StaticText(panel, label="閲覧URL(友人に伝えるアドレス)")
+        lbl = wx.StaticText(panel, label=t("pub.viewer"))
         s.Add(lbl, 0, wx.LEFT | wx.TOP, 8)
         self.viewer_ctrl = wx.TextCtrl(panel, style=wx.TE_READONLY)
-        self.viewer_ctrl.SetName("閲覧URL")
+        self.viewer_ctrl.SetName(t("pub.viewer_name"))
         self._update_viewer_url()
         s.Add(self.viewer_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
         btns = wx.BoxSizer(wx.HORIZONTAL)
-        issue_btn = wx.Button(panel, label="閲覧URLを発行(再発行)")
-        issue_btn.SetName("閲覧URLを発行")
-        ok = wx.Button(panel, label="保存")
-        ok.SetName("保存")
-        cancel = wx.Button(panel, label="キャンセル")
-        cancel.SetName("キャンセル")
+        issue_btn = wx.Button(panel, label=t("pub.issue"))
+        issue_btn.SetName(t("pub.issue_name"))
+        ok = wx.Button(panel, label=t("btn.save"))
+        ok.SetName(t("btn.save"))
+        cancel = wx.Button(panel, label=t("btn.cancel"))
+        cancel.SetName(t("btn.cancel"))
         btns.Add(issue_btn, 0, wx.ALL, 8)
         btns.Add(ok, 0, wx.ALL, 8)
         btns.Add(cancel, 0, wx.ALL, 8)
@@ -549,18 +528,18 @@ class PublishDialog(wx.Dialog):
 
     def _update_viewer_url(self):
         url = viewer_url_for(self._url(), self._token())
-        self.viewer_ctrl.SetValue(url or "未発行(発行ボタンで作成)")
+        self.viewer_ctrl.SetValue(url or t("pub.not_issued"))
 
     def _check_relay_url(self) -> bool:
         """relay のURLが使えるものでなければ知らせて入力欄へ戻す。"""
         url = self._url()
         if not url:
-            msg = "relayのURLを入力してください。"
+            msg = t("pub.need_relay")
         elif not is_safe_relay_url(url):
-            msg = URL_SCHEME_MESSAGE + "。"
+            msg = t("pub.need_https")
         else:
             return True
-        wx.MessageBox(msg, "公開設定", wx.OK | wx.ICON_WARNING, self)
+        wx.MessageBox(msg, t("pub.panel"), wx.OK | wx.ICON_WARNING, self)
         self.url_ctrl.SetFocus()
         return False
 
@@ -568,10 +547,8 @@ class PublishDialog(wx.Dialog):
         if not self._check_relay_url():
             return
         if self._pub.token and not self._new_token:
-            ans = wx.MessageBox(
-                "閲覧URLを作り直します。「保存」を押すと、今の閲覧URLは"
-                "見られなくなります。作り直しますか?",
-                "確認", wx.YES_NO | wx.ICON_QUESTION, self)
+            ans = wx.MessageBox(t("pub.reissue_confirm"), t("pub.confirm"),
+                                wx.YES_NO | wx.ICON_QUESTION, self)
             if ans != wx.YES:
                 return
         self._new_token = new_token()

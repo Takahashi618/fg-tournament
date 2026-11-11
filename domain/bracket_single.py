@@ -5,7 +5,7 @@ winner_to / loser_to の配線は wire_routes() が各スロットの参照元�
 """
 from __future__ import annotations
 
-from .models import BYE_ID, Config, Match, Phase, Player, Slot, SourceType
+from .models import BYE_ID, MIN_PLAYERS, Config, Match, Phase, Player, Slot, SourceType
 
 
 def bracket_size(n_players: int) -> int:
@@ -58,8 +58,9 @@ def wire_routes(matches: list[Match]) -> None:
 def build_single_elim(ordered_players: list[Player], config: Config) -> list[Match]:
     """ordered_players はシード順(1位が先頭)。"""
     n = len(ordered_players)
-    if n < 2:
-        raise ValueError("シングルエリミネーションは2人以上が必要です")
+    if n < MIN_PLAYERS:
+        # 利用者向けの人数チェックは engine.check_player_count が先に行う
+        raise ValueError(f"single elimination needs at least {MIN_PLAYERS} players")
     size = bracket_size(n)
     k = round_count(size)
     positions = seed_slots(size)
